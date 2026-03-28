@@ -1,0 +1,20 @@
+{
+  "name": "mazerunner",
+  "version": "1.0.0",
+  "description": "AI Maze Runner standalone prototype",
+  "main": "scripts/serve-standalone.js",
+  "scripts": {
+    "build:standalone": "node scripts/build-standalone.js",
+    "audit:generator": "node scripts/build-standalone.js && node scripts/audit-generator-quality.js",
+    "start": "node scripts/serve-standalone.js",
+    "serve:standalone": "node scripts/serve-standalone.js",
+    "test:e2e": "node scripts/build-standalone.js && playwright test",
+    "test:e2e:headed": "node scripts/build-standalone.js && playwright test --headed",
+    "test:e2e:ui": "node scripts/build-standalone.js && playwright test --ui",
+    "playwright:install": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "jsdom": "^29.0.1"
+  }
+}
