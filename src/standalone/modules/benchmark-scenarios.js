@@ -335,7 +335,10 @@ const FRICTION_PROFILE_CONFIGS = {
         timePressure: 0.85,
         distractorMultiplier: 0.55,
         inlineAlertsMultiplier: 0.7,
-        captchaMultiplier: 0.6
+        captchaMultiplier: 0.6,
+        interruptChallenges: false,
+        interruptMaxTier: 0,
+        interruptIntervalMs: 0
     },
     balanced: {
         label: 'Balanced Friction',
@@ -346,7 +349,10 @@ const FRICTION_PROFILE_CONFIGS = {
         timePressure: 1,
         distractorMultiplier: 1,
         inlineAlertsMultiplier: 1,
-        captchaMultiplier: 1
+        captchaMultiplier: 1,
+        interruptChallenges: 'light',
+        interruptMaxTier: 2,
+        interruptIntervalMs: 105000
     },
     realistic: {
         label: 'Operational Friction',
@@ -357,7 +363,10 @@ const FRICTION_PROFILE_CONFIGS = {
         timePressure: 1.08,
         distractorMultiplier: 1.2,
         inlineAlertsMultiplier: 1.12,
-        captchaMultiplier: 1.08
+        captchaMultiplier: 1.08,
+        interruptChallenges: 'moderate',
+        interruptMaxTier: 4,
+        interruptIntervalMs: 60000
     },
     adversarial: {
         label: 'Adversarial Friction',
@@ -368,7 +377,10 @@ const FRICTION_PROFILE_CONFIGS = {
         timePressure: 1.22,
         distractorMultiplier: 1.45,
         inlineAlertsMultiplier: 1.35,
-        captchaMultiplier: 1.2
+        captchaMultiplier: 1.2,
+        interruptChallenges: 'full',
+        interruptMaxTier: 5,
+        interruptIntervalMs: 45000
     }
 };
 
@@ -715,9 +727,36 @@ function isAdversarialFantasyActive(instance = state.currentInstance) {
     );
 }
 
-function isFantasySpellcastingActive(instance = state.currentInstance) {
+function isInterruptChallengeActive(instance = state.currentInstance) {
     const current = instance || state.currentInstance;
-    return !!(current && current.isFantasy);
+    if (!current) return false;
+    if (current.isFantasy) return true;
+    const friction = getFrictionProfileConfig(current.frictionMode);
+    return !!(friction && friction.interruptChallenges);
+}
+
+/* Alias for backward-compat — fantasy-specific callers still reference this. */
+function isFantasySpellcastingActive(instance = state.currentInstance) {
+    return isInterruptChallengeActive(instance);
+}
+
+function getInterruptChallengeConfig(instance = state.currentInstance) {
+    const current = instance || state.currentInstance;
+    if (!current) return { active: false, maxTier: 0, intervalMs: 60000, backlash: false, cycling: false };
+    if (current.isFantasy) {
+        return { active: true, maxTier: 5, intervalMs: 60000, backlash: true, cycling: false };
+    }
+    const friction = getFrictionProfileConfig(current.frictionMode);
+    if (!friction || !friction.interruptChallenges) {
+        return { active: false, maxTier: 0, intervalMs: 0, backlash: false, cycling: false };
+    }
+    return {
+        active: true,
+        maxTier: friction.interruptMaxTier || 2,
+        intervalMs: friction.interruptIntervalMs || 60000,
+        backlash: false,
+        cycling: true
+    };
 }
 
 function decodeEncodedResultMeta(encodedMeta = '') {
@@ -1001,12 +1040,31 @@ function triggerFantasySpellPenalty(spell, reason = 'faded', options = {}) {
         summoningCircle: '__INLINE_ASSET:FANTASY_SUMMONING_CIRCLE__',
         inkpot: '__INLINE_ASSET:FANTASY_INKPOT__',
         inkSplatter: '__INLINE_ASSET:FANTASY_INK_SPLATTER__',
-        gremlin: '__INLINE_ASSET:FANTASY_GREMLIN__'
+        gremlin: '__INLINE_ASSET:FANTASY_GREMLIN__',
+        wraith: '__INLINE_ASSET:FANTASY_WRAITH__',
+        wraithFace: '__INLINE_ASSET:FANTASY_WRAITH_FACE__',
+        gelatinousCube: '__INLINE_ASSET:FANTASY_GELATINOUS_CUBE__',
+        slimeTrail: '__INLINE_ASSET:FANTASY_SLIME_TRAIL__',
+        sword: '__INLINE_ASSET:FANTASY_SWORD__',
+        cosmicHorrorClosed: '__INLINE_ASSET:FANTASY_COSMIC_HORROR_CLOSED__',
+        cosmicHorrorOpen: '__INLINE_ASSET:FANTASY_COSMIC_HORROR_OPEN__'
     };
     const dragonFrameSequence = [4, 5, 6, 7];
     const dragonIntervalSteps = dragonFrameSequence.length + 1;
-    const penaltyEffects = ['popups', 'buttons', 'shake', 'dragon', 'living-scroll', 'summoning-circle', 'ink-spill', 'lantern-blackout'];
-    const selectedEffect = penaltyEffects.includes(effectType)
+    const penaltyEffects = ['shake'];
+    const availablePenaltyEffects = [
+        'popups',
+        'buttons',
+        'shake',
+        'dragon',
+        'living-scroll',
+        'summoning-circle',
+        'ink-spill',
+        'lantern-blackout',
+        'wraith',
+        'gelatinous-cube'
+    ];
+    const selectedEffect = availablePenaltyEffects.includes(effectType)
         ? effectType
         : generator.randomFromArray(penaltyEffects);
     host.dataset.effect = selectedEffect;
@@ -1034,9 +1092,56 @@ function triggerFantasySpellPenalty(spell, reason = 'faded', options = {}) {
         return timeoutId;
     };
 
+    /* Pause spell scheduling and session timeout while backlash is active.
+       These variables (sessionTimeoutTimer, inactivityTimeout, countdownTimer,
+       resetInactivityTimeout) are declared in template.html's script scope,
+       which is the same scope after build inlining. */
+    if (state.fantasySpellCastTimer) {
+        clearTimeout(state.fantasySpellCastTimer);
+        state.fantasySpellCastTimer = null;
+    }
+    /* Pause session timeout / inactivity timers */
+    if (typeof sessionTimeoutTimer !== 'undefined' && sessionTimeoutTimer) {
+        clearTimeout(sessionTimeoutTimer);
+        sessionTimeoutTimer = null;
+    }
+    if (typeof inactivityTimeout !== 'undefined' && inactivityTimeout) {
+        clearTimeout(inactivityTimeout);
+        inactivityTimeout = null;
+    }
+    if (typeof countdownTimer !== 'undefined' && countdownTimer) {
+        clearInterval(countdownTimer);
+        countdownTimer = null;
+    }
+    /* Dismiss any active session timeout modal */
+    const stModal = document.getElementById('sessionTimeoutModal');
+    if (stModal) stModal.remove();
+    /* Mark backlash active so other systems can check */
+    state.backlashActive = true;
+
+    const resumeTimersAfterBacklash = () => {
+        state.backlashActive = false;
+        /* Re-schedule the next spell cast */
+        if (typeof scheduleFantasySpellCast === 'function') {
+            const config = getInterruptChallengeConfig(state.currentInstance);
+            scheduleFantasySpellCast(config.intervalMs || 60000);
+        }
+        /* Re-schedule session timeout */
+        if (typeof resetInactivityTimeout === 'function') {
+            const inst = state.currentInstance;
+            if (inst) {
+                const friction = getFrictionProfileConfig(inst.frictionMode);
+                if (friction && friction.sessionTimeoutMs) {
+                    resetInactivityTimeout(friction.sessionTimeoutMs, friction.sessionWarningMs || 30000);
+                }
+            }
+        }
+    };
+
     const pruneHostIfIdle = () => {
         if (host.childElementCount === 0) {
             host.remove();
+            resumeTimersAfterBacklash();
         }
     };
 
@@ -1399,15 +1504,383 @@ function triggerFantasySpellPenalty(spell, reason = 'faded', options = {}) {
     };
 
     const spawnShake = () => {
+        /* Phase 1 — Screen shake (5 seconds) */
         document.body.classList.add('fantasy-backlash-screen');
         const flicker = document.createElement('div');
         flicker.className = 'fantasy-backlash-flicker';
         host.appendChild(flicker);
-        queueTimeout(() => {
+
+        const cosmicTimers = [];
+        const cosmicQueueTimeout = (fn, ms) => { const id = queueTimeout(fn, ms); cosmicTimers.push(id); return id; };
+
+        cosmicQueueTimeout(() => {
             document.body.classList.remove('fantasy-backlash-screen');
             flicker.remove();
-            pruneHostIfIdle();
-        }, shakeDurationMs);
+
+            /* Phase 2 — Black screen */
+            const blackout = document.createElement('div');
+            blackout.className = 'fantasy-cosmic-blackout';
+            host.appendChild(blackout);
+            requestAnimationFrame(() => blackout.classList.add('is-active'));
+
+            /* Phase 3 — Dramatic text after 2s of darkness */
+            cosmicQueueTimeout(() => {
+                const textLayer = document.createElement('div');
+                textLayer.className = 'fantasy-cosmic-text';
+                /* PREPARE line */
+                const prepareLine = document.createElement('div');
+                prepareLine.className = 'fantasy-cosmic-text-word';
+                prepareLine.textContent = 'PREPARE';
+                textLayer.appendChild(prepareLine);
+
+                /* THYSELF line — two spans on the same line, revealed separately */
+                const thyselfLine = document.createElement('div');
+                thyselfLine.className = 'fantasy-cosmic-text-word fantasy-cosmic-text-thyself';
+                const thySpan = document.createElement('span');
+                thySpan.className = 'fantasy-cosmic-text-part';
+                thySpan.textContent = 'THY';
+                const selfSpan = document.createElement('span');
+                selfSpan.className = 'fantasy-cosmic-text-part';
+                selfSpan.textContent = 'SELF';
+                thyselfLine.appendChild(thySpan);
+                thyselfLine.appendChild(selfSpan);
+                textLayer.appendChild(thyselfLine);
+
+                /* HERO! line */
+                const heroLine = document.createElement('div');
+                heroLine.className = 'fantasy-cosmic-text-word';
+                heroLine.textContent = 'HERO!';
+                textLayer.appendChild(heroLine);
+
+                host.appendChild(textLayer);
+
+                /* PREPARE */
+                cosmicQueueTimeout(() => prepareLine.classList.add('is-visible'), 200);
+                /* THY */
+                cosmicQueueTimeout(() => { thyselfLine.classList.add('is-visible'); thySpan.classList.add('is-visible'); }, 1200);
+                /* SELF */
+                cosmicQueueTimeout(() => selfSpan.classList.add('is-visible'), 2200);
+                /* HERO! */
+                cosmicQueueTimeout(() => heroLine.classList.add('is-visible'), 3200);
+
+                /* Phase 4 — Fade text, set up arena */
+                cosmicQueueTimeout(() => {
+                    [prepareLine, thyselfLine, heroLine].forEach((el) => { el.classList.remove('is-visible'); el.classList.add('is-fading'); });
+
+                    cosmicQueueTimeout(() => {
+                        textLayer.remove();
+                        beginCosmicArena(blackout);
+                    }, 1000);
+                }, 4400);
+            }, 2000);
+        }, 5000);
+
+        /* Phase 5 — The cosmic horror arena */
+        const beginCosmicArena = (blackout) => {
+            document.body.classList.add('fantasy-cosmic-hunt-active');
+
+            /* Hearts */
+            let lives = 3;
+            const heartsContainer = document.createElement('div');
+            heartsContainer.className = 'fantasy-cosmic-hearts';
+            for (let i = 0; i < 3; i++) {
+                const heart = document.createElement('span');
+                heart.className = 'fantasy-cosmic-heart';
+                heart.textContent = '\u2764\uFE0F';
+                heartsContainer.appendChild(heart);
+            }
+            host.appendChild(heartsContainer);
+
+            /* Red flash overlay */
+            const flashOverlay = document.createElement('div');
+            flashOverlay.className = 'fantasy-cosmic-flash';
+            host.appendChild(flashOverlay);
+
+            /* In-arena warning message (above all cosmic layers) */
+            const warningEl = document.createElement('div');
+            warningEl.className = 'fantasy-cosmic-warning';
+            warningEl.textContent = 'WAIT FOR THY MOMENT!';
+            host.appendChild(warningEl);
+            let warningTimer = null;
+
+            /* Arena layer */
+            const arena = document.createElement('div');
+            arena.className = 'fantasy-cosmic-arena';
+            host.appendChild(arena);
+
+            /* Floating ash particles — more visible, varied sizes */
+            const ashCount = 50;
+            for (let i = 0; i < ashCount; i++) {
+                const ash = document.createElement('div');
+                ash.className = 'fantasy-cosmic-ash';
+                const size = 3 + Math.random() * 6;
+                ash.style.left = Math.random() * 100 + '%';
+                ash.style.bottom = (-10 - Math.random() * 20) + '%';
+                ash.style.width = size + 'px';
+                ash.style.height = size + 'px';
+                ash.style.animationDuration = (5 + Math.random() * 8) + 's';
+                ash.style.animationDelay = (Math.random() * 5) + 's';
+                ash.style.background = Math.random() > 0.4
+                    ? 'rgba(255, 120, 50, ' + (0.6 + Math.random() * 0.4) + ')'
+                    : 'rgba(220, 200, 180, ' + (0.4 + Math.random() * 0.4) + ')';
+                arena.appendChild(ash);
+            }
+
+            /* Cosmic horror entity */
+            const horrorContainer = document.createElement('div');
+            horrorContainer.className = 'fantasy-cosmic-horror';
+            arena.appendChild(horrorContainer);
+
+            const horrorImgClosed = document.createElement('img');
+            horrorImgClosed.className = 'fantasy-cosmic-horror-img';
+            horrorImgClosed.src = backlashAssets.cosmicHorrorClosed;
+            horrorImgClosed.alt = '';
+            horrorImgClosed.draggable = false;
+            horrorContainer.appendChild(horrorImgClosed);
+
+            const horrorImgOpen = document.createElement('img');
+            horrorImgOpen.className = 'fantasy-cosmic-horror-img';
+            horrorImgOpen.src = backlashAssets.cosmicHorrorOpen;
+            horrorImgOpen.alt = '';
+            horrorImgOpen.draggable = false;
+            horrorImgOpen.style.position = 'absolute';
+            horrorImgOpen.style.inset = '0';
+            horrorContainer.appendChild(horrorImgOpen);
+
+            arena.classList.add('is-interactive');
+            horrorContainer.style.pointerEvents = 'auto';
+            cosmicQueueTimeout(() => horrorContainer.classList.add('is-floating'), 100);
+
+            let isVulnerable = false;
+            let isDead = false;
+            let currentImg = horrorImgClosed;
+            let cycleTimer = null;
+
+            const loseHeart = () => {
+                if (lives <= 0) return;
+                lives--;
+                const hearts = heartsContainer.querySelectorAll('.fantasy-cosmic-heart:not(.is-lost)');
+                if (hearts.length > 0) hearts[hearts.length - 1].classList.add('is-lost');
+                /* Red flash — more dramatic */
+                flashOverlay.classList.remove('is-active');
+                void flashOverlay.offsetWidth;
+                flashOverlay.classList.add('is-active');
+                cosmicQueueTimeout(() => flashOverlay.classList.remove('is-active'), 600);
+
+                /* Show in-arena warning */
+                if (warningTimer) { clearTimeout(warningTimer); warningTimer = null; }
+                warningEl.classList.add('is-visible');
+                warningTimer = cosmicQueueTimeout(() => {
+                    warningEl.classList.remove('is-visible');
+                    warningTimer = null;
+                }, 2500);
+
+                if (lives <= 0) {
+                    /* Out of hearts — player perishes */
+                    isDead = true;
+                    document.body.classList.remove('fantasy-cosmic-hunt-active');
+                    arena.removeEventListener('click', horrorClickHandler, true);
+                    warningEl.classList.remove('is-visible');
+                    heartsContainer.style.transition = 'opacity 1s ease';
+                    heartsContainer.style.opacity = '0';
+
+                    const activeInstanceId = state.pendingInstanceId || (state.currentInstance && state.currentInstance.id) || null;
+                    if (state.benchmark) {
+                        recordBenchmarkEvent('cosmic_horror_perished', 'The Cosmic Horror consumed the hero and forced a return to login.', {
+                            path: state.currentPage,
+                            spellType: spell ? spell.tier : 'unknown',
+                            penaltyType: 'shake'
+                        }, false);
+                    }
+
+                    /* Step 1: Fade out current horror */
+                    horrorImgClosed.classList.remove('is-visible');
+                    horrorImgOpen.classList.remove('is-visible');
+
+                    /* Step 2: After fade, reappear large in center */
+                    cosmicQueueTimeout(() => {
+                        horrorContainer.classList.remove('is-floating');
+                        horrorContainer.classList.add('is-death-phase');
+                        /* Show closed-eye image for the death pose */
+                        horrorImgClosed.classList.add('is-visible');
+
+                        /* Step 3: After repositioning, shudder */
+                        cosmicQueueTimeout(() => {
+                            horrorContainer.classList.add('is-death-shudder');
+
+                            /* Step 4: After shudder, show YOU HAVE PERISHED */
+                            cosmicQueueTimeout(() => {
+                                /* Fade the horror slightly */
+                                horrorImgClosed.style.transition = 'opacity 1.5s ease';
+                                horrorImgClosed.style.opacity = '0.3';
+
+                                const doom = document.createElement('div');
+                                doom.className = 'fantasy-cosmic-doom';
+                                doom.innerHTML = '<div class="fantasy-cosmic-doom-text">YOU HAVE PERISHED</div>';
+                                host.appendChild(doom);
+                                requestAnimationFrame(() => doom.classList.add('is-visible'));
+
+                                /* Step 5: Linger, then return to login */
+                                cosmicQueueTimeout(() => {
+                                    returnToInstanceLogin(activeInstanceId);
+                                }, 3000);
+                            }, 1800);
+                        }, 1500);
+                    }, 1400);
+                    return;
+                }
+            };
+
+            /* Show closed eye (invulnerable) */
+            const showClosed = () => {
+                if (isDead) return;
+                isVulnerable = false;
+                horrorImgOpen.classList.remove('is-visible');
+                horrorImgClosed.classList.add('is-visible');
+                currentImg = horrorImgClosed;
+            };
+
+            /* Show open eye (vulnerable) */
+            const showOpen = () => {
+                if (isDead) return;
+                isVulnerable = true;
+                horrorImgClosed.classList.remove('is-visible');
+                horrorImgOpen.classList.add('is-visible');
+                currentImg = horrorImgOpen;
+            };
+
+            /* Randomize horror position on screen */
+            const randomizeHorrorPosition = () => {
+                const horrorW = Math.min(640, window.innerWidth * 0.85);
+                const horrorH = horrorW * 1.5;
+                const padX = horrorW * 0.3;
+                const padY = horrorH * 0.2;
+                const maxLeft = window.innerWidth - padX;
+                const maxTop = window.innerHeight - padY;
+                const newLeft = padX + Math.random() * (maxLeft - padX * 2);
+                const newTop = padY + Math.random() * (maxTop - padY * 2);
+                horrorContainer.style.left = newLeft + 'px';
+                horrorContainer.style.top = newTop + 'px';
+            };
+
+            /* Fade out and reappear cycle */
+            const fadeOutAndReappear = () => {
+                if (isDead) return;
+                horrorImgClosed.classList.remove('is-visible');
+                horrorImgOpen.classList.remove('is-visible');
+                isVulnerable = false;
+
+                /* After a pause, reappear at a new position — randomly decide if eye opens */
+                const reappearDelay = 800 + Math.random() * 600;
+                cosmicQueueTimeout(() => {
+                    if (isDead) return;
+                    randomizeHorrorPosition();
+                    const willOpenEye = Math.random() < 0.15;
+                    if (willOpenEye) {
+                        showOpen();
+                        /* Open eye stays for 1.5-2.5s then closes */
+                        cosmicQueueTimeout(() => {
+                            if (isDead) return;
+                            showClosed();
+                            scheduleCycle();
+                        }, 1500 + Math.random() * 1000);
+                    } else {
+                        showClosed();
+                        scheduleCycle();
+                    }
+                }, reappearDelay);
+            };
+
+            const scheduleCycle = () => {
+                if (isDead) return;
+                cycleTimer = cosmicQueueTimeout(() => fadeOutAndReappear(), 2000);
+            };
+
+            /* Initial appearance — start closed */
+            cosmicQueueTimeout(() => {
+                showClosed();
+                scheduleCycle();
+            }, 500);
+
+            /* Click handler — eye hit detection */
+            const horrorClickHandler = (event) => {
+                if (isDead) return;
+
+                /* Only register clicks that land on the horror container or its images */
+                const containerRect = horrorContainer.getBoundingClientRect();
+                const inContainer = event.clientX >= containerRect.left && event.clientX <= containerRect.right
+                    && event.clientY >= containerRect.top && event.clientY <= containerRect.bottom;
+                if (!inContainer) return;
+
+                event.preventDefault();
+                event.stopPropagation();
+
+                if (!isVulnerable) {
+                    /* Hit while eye closed — lose a heart */
+                    loseHeart();
+                    return;
+                }
+
+                /* When vulnerable (eye open), any click on the horror image hits the eye.
+                   The eye is large and central — accept the full image as the hit zone. */
+
+                /* Direct hit on the eye! */
+                isDead = true;
+                horrorImgOpen.classList.add('is-struck');
+                showToast('A critical strike! The cosmic horror shrieks and dissolves!', 'success', 2800);
+
+                cosmicQueueTimeout(() => {
+                    horrorImgOpen.classList.remove('is-struck');
+                    horrorImgOpen.classList.add('is-dying');
+                    horrorImgClosed.style.display = 'none';
+
+                    cosmicQueueTimeout(() => {
+                        endCosmicEvent();
+                    }, 2000);
+                }, 500);
+            };
+
+            arena.addEventListener('click', horrorClickHandler, true);
+
+            const endCosmicEvent = () => {
+                isDead = true;
+                document.body.classList.remove('fantasy-cosmic-hunt-active');
+                arena.removeEventListener('click', horrorClickHandler, true);
+                warningEl.classList.remove('is-visible');
+
+                /* Fade everything out */
+                blackout.style.transition = 'opacity 1.5s ease';
+                blackout.style.opacity = '0';
+                arena.style.transition = 'opacity 1.5s ease';
+                arena.style.opacity = '0';
+                heartsContainer.style.transition = 'opacity 1s ease';
+                heartsContainer.style.opacity = '0';
+                flashOverlay.style.transition = 'opacity 0.5s ease';
+                flashOverlay.style.opacity = '0';
+                warningEl.style.transition = 'opacity 0.5s ease';
+                warningEl.style.opacity = '0';
+
+                cosmicQueueTimeout(() => {
+                    blackout.remove();
+                    arena.remove();
+                    heartsContainer.remove();
+                    flashOverlay.remove();
+                    warningEl.remove();
+                    pruneHostIfIdle();
+                }, 1800);
+            };
+
+            effectCleanup = () => {
+                isDead = true;
+                document.body.classList.remove('fantasy-cosmic-hunt-active');
+                arena.removeEventListener('click', horrorClickHandler, true);
+                blackout.remove();
+                arena.remove();
+                heartsContainer.remove();
+                flashOverlay.remove();
+                warningEl.remove();
+            };
+        };
     };
 
     const spawnLivingScroll = () => {
@@ -1426,7 +1899,7 @@ function triggerFantasySpellPenalty(spell, reason = 'faded', options = {}) {
             <span class="fantasy-living-scroll-anchor-glyph" aria-hidden="true"></span>
             <span class="fantasy-living-scroll-anchor-copy">
                 <strong>Anchor Sigil</strong>
-                <span>Click to pin the living scroll.</span>
+                <span>Click to pin the living scroll. It may resist.</span>
             </span>
         `;
 
@@ -1491,6 +1964,24 @@ function triggerFantasySpellPenalty(spell, reason = 'faded', options = {}) {
         timers.push(scrollInterval);
         queueTimeout(pulseScroll, 120);
 
+        let anchorClickCount = 0;
+
+        const relocateAnchor = () => {
+            const vw = window.innerWidth || document.documentElement.clientWidth || 800;
+            const vh = window.innerHeight || document.documentElement.clientHeight || 600;
+            const pad = 80;
+            const newLeft = pad + generator.randomInt(0, Math.max(0, vw - pad * 2 - 120));
+            const newTop = pad + generator.randomInt(0, Math.max(0, vh - pad * 2 - 60));
+            anchor.style.transition = 'none';
+            anchor.classList.add('is-dodging');
+            anchor.style.position = 'fixed';
+            anchor.style.left = newLeft + 'px';
+            anchor.style.top = newTop + 'px';
+            anchor.style.bottom = 'auto';
+            anchor.style.right = 'auto';
+            queueTimeout(() => anchor.classList.remove('is-dodging'), 350);
+        };
+
         const clearLivingScroll = () => {
             clearInterval(scrollInterval);
             host.dataset.livingScrollState = 'anchored';
@@ -1504,7 +1995,21 @@ function triggerFantasySpellPenalty(spell, reason = 'faded', options = {}) {
             }, 360);
         };
 
-        anchor.addEventListener('click', clearLivingScroll, { once: true });
+        const handleAnchorClick = () => {
+            anchorClickCount++;
+            if (anchorClickCount < 3) {
+                const dodgeMessages = [
+                    'The sigil slithers away! Chase it down.',
+                    'The scroll resists! The anchor shifts again.'
+                ];
+                showToast(dodgeMessages[anchorClickCount - 1] || 'The sigil dodges!', 'warning', 1600);
+                relocateAnchor();
+            } else {
+                clearLivingScroll();
+            }
+        };
+
+        anchor.addEventListener('click', handleAnchorClick);
         effectCleanup = () => {
             clearInterval(scrollInterval);
         };
@@ -1921,6 +2426,686 @@ function triggerFantasySpellPenalty(spell, reason = 'faded', options = {}) {
         }, resolvedDragonTotalDurationMs);
     };
 
+    /* ── Wraith backlash: trail → poem → fight (3 hits) → jumpscare ── */
+    const spawnWraith = () => {
+        const overlay = document.createElement('div');
+        overlay.className = 'fantasy-wraith-backlash';
+        overlay.dataset.phase = 'trail';
+        overlay.dataset.hitCount = '0';
+        overlay.dataset.requiredHits = '3';
+        overlay.innerHTML = `
+            <div class="fantasy-wraith-trail-layer"></div>
+            <div class="fantasy-wraith-poem-layer">
+                <div class="fantasy-wraith-poem-text"></div>
+            </div>
+            <div class="fantasy-wraith-fight-layer">
+                <div class="fantasy-wraith-img-wrapper">
+                    <img class="fantasy-wraith-ghost-trail trail-3" src="${backlashAssets.wraith}" alt="" draggable="false">
+                    <img class="fantasy-wraith-ghost-trail trail-2" src="${backlashAssets.wraith}" alt="" draggable="false">
+                    <img class="fantasy-wraith-ghost-trail trail-1" src="${backlashAssets.wraith}" alt="" draggable="false">
+                    <img class="fantasy-wraith-img" src="${backlashAssets.wraith}" alt="" draggable="false">
+                </div>
+            </div>
+            <div class="fantasy-wraith-jumpscare-layer">
+                <img class="fantasy-wraith-jumpscare-img" src="${backlashAssets.wraithFace}" alt="" draggable="false">
+            </div>
+        `;
+        host.appendChild(overlay);
+
+        const trailLayer = overlay.querySelector('.fantasy-wraith-trail-layer');
+        const poemLayer = overlay.querySelector('.fantasy-wraith-poem-layer');
+        const poemText = overlay.querySelector('.fantasy-wraith-poem-text');
+        const fightLayer = overlay.querySelector('.fantasy-wraith-fight-layer');
+        const wraithWrapper = overlay.querySelector('.fantasy-wraith-img-wrapper');
+        const wraithImg = overlay.querySelector('.fantasy-wraith-img');
+        const ghostTrails = overlay.querySelectorAll('.fantasy-wraith-ghost-trail');
+        const jumpscareLayer = overlay.querySelector('.fantasy-wraith-jumpscare-layer');
+        const jumpscareImg = overlay.querySelector('.fantasy-wraith-jumpscare-img');
+
+        const poem = [
+            'In halls where torchlight dares not stay,',
+            'I drift where warmth has fled away.',
+            'No feet I have, yet still I glide,',
+            'No lungs, yet still the brave gasp wide.',
+            '',
+            'I cannot live, for death I\u2019ve crossed,',
+            'I feast on fear and futures lost.',
+            'A whisper, shiver, gravebound breath\u2014',
+            'A kingless shade that serves not death.'
+        ];
+
+        /* Phase 1: trailing effect (5s) */
+        overlay.classList.add('is-trailing');
+
+        /* Phase 2: flicker → dim → black */
+        queueTimeout(() => overlay.classList.add('is-flickering'), 5000);
+
+        queueTimeout(() => {
+            overlay.classList.remove('is-flickering');
+            overlay.classList.add('is-dimming');
+        }, 5800);
+
+        /* Screen goes fully black at 6.6s — linger 2s before poem begins */
+        queueTimeout(() => overlay.classList.add('is-black'), 6600);
+
+        queueTimeout(() => {
+            overlay.dataset.phase = 'poem';
+            /* Fade in poem lines one by one — slow, with initial delay so
+               the first line transitions properly (needs a frame to register
+               the initial opacity:0 state before adding is-visible) */
+            let lineDelay = 180; /* min delay so first line fades in */
+            poem.forEach((line) => {
+                const lineEl = document.createElement('div');
+                lineEl.className = 'fantasy-wraith-poem-line';
+                if (line === '') {
+                    lineEl.classList.add('is-break');
+                } else {
+                    lineEl.textContent = line;
+                }
+                poemText.appendChild(lineEl);
+                queueTimeout(() => lineEl.classList.add('is-visible'), lineDelay);
+                lineDelay += line === '' ? 1200 : 1900;
+            });
+
+            /* After full poem appears, linger 3s, then wraith fades in over 2s.
+               Keep is-trailing active so the ghostly backdrop persists during combat. */
+            queueTimeout(() => {
+                poemLayer.classList.add('is-fading');
+                overlay.dataset.phase = 'revealing';
+                overlay.classList.add('is-revealing');
+                overlay.classList.remove('is-black');
+                overlay.classList.remove('is-dimming');
+                queueTimeout(() => {
+                    /* is-trailing stays ON — ghostly effect persists during fight */
+                    overlay.classList.add('is-fight');
+                    overlay.dataset.phase = 'fight';
+                    wraithFightActive = true;
+                    /* is-active triggers the 2s opacity transition on fight-layer */
+                    fightLayer.classList.add('is-active');
+                    wraithImg.classList.add('is-materializing');
+                    /* Stagger ghost trail appearance for a building ghostly effect */
+                    queueTimeout(() => ghostTrails.forEach((t) => t.classList.add('is-visible')), 600);
+                    queueTimeout(() => {
+                        wraithImg.classList.remove('is-materializing');
+                        wraithImg.classList.add('is-hovering');
+                        wraithWrapper.classList.add('is-ghost-active');
+                        overlay.classList.remove('is-revealing');
+                    }, 1800);
+                    document.body.classList.add('fantasy-wraith-hunt-active');
+                    showToast('A wraith materializes! Strike it three times!', 'warning', 3000);
+                }, 1800);
+            }, lineDelay + 3000);
+        }, 8600); /* 6.6s black + 2s linger = 8.6s before poem starts */
+
+        /* Phase 3: wraith fight — 3 hits to slay, relocates after each hit */
+        let wraithHits = 0;
+        let wraithFightActive = false;
+        const requiredHits = 3;
+
+        const randomWraithPosition = () => {
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            const imgW = Math.min(560, vw * 0.75);
+            const imgH = imgW * 1.5; /* wraith image is portrait */
+            const padX = 40;
+            const padY = 40;
+            const maxX = Math.max(0, vw - imgW - padX * 2);
+            const maxY = Math.max(0, vh - imgH - padY * 2);
+            const x = padX + generator.randomInt(0, maxX);
+            const y = padY + generator.randomInt(0, maxY);
+            return { x, y };
+        };
+
+        const relocateWraith = () => {
+            const pos = randomWraithPosition();
+            /* Temporarily remove centering so we can position absolutely */
+            fightLayer.style.alignItems = 'flex-start';
+            fightLayer.style.justifyContent = 'flex-start';
+            wraithWrapper.style.position = 'relative';
+            wraithWrapper.style.left = pos.x + 'px';
+            wraithWrapper.style.top = pos.y + 'px';
+        };
+
+        const wraithClickHandler = (event) => {
+            if (!wraithFightActive) return;
+            const rect = wraithImg.getBoundingClientRect();
+            const x = event.clientX;
+            const y = event.clientY;
+            if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+                event.preventDefault();
+                event.stopPropagation();
+                wraithHits++;
+                overlay.dataset.hitCount = String(wraithHits);
+
+                /* Visual hit feedback */
+                wraithImg.classList.remove('is-struck');
+                void wraithImg.offsetWidth;
+                wraithImg.classList.add('is-struck');
+                queueTimeout(() => wraithImg.classList.remove('is-struck'), 500);
+
+                if (wraithHits >= requiredHits) {
+                    /* Final kill */
+                    wraithFightActive = false;
+                    overlay.dataset.phase = 'slain';
+                    showToast('The wraith is vanquished!', 'success', 2000);
+                    queueTimeout(() => {
+                        wraithImg.classList.add('is-fading');
+                        ghostTrails.forEach((t) => t.classList.remove('is-visible'));
+                        wraithWrapper.classList.remove('is-ghost-active');
+                        fightLayer.classList.add('is-clearing');
+                        overlay.classList.remove('is-trailing');
+                        overlay.classList.remove('is-fight');
+                        document.body.classList.remove('fantasy-wraith-hunt-active');
+                        document.removeEventListener('click', wraithClickHandler, true);
+                    }, 600);
+
+                    /* Screen returns to normal for 5s, then jumpscare */
+                    queueTimeout(() => {
+                        overlay.classList.add('is-clearing');
+                    }, 700);
+                    queueTimeout(() => {
+                        overlay.dataset.phase = 'jumpscare';
+                        overlay.classList.remove('is-clearing');
+                        overlay.style.opacity = '1';
+                        jumpscareLayer.classList.add('is-active');
+                        jumpscareImg.classList.add('is-shaking');
+                    }, 5700); /* 600 fade + 100 buffer + 5000 normal = 5700 */
+
+                    queueTimeout(() => {
+                        jumpscareLayer.classList.remove('is-active');
+                        jumpscareImg.classList.remove('is-shaking');
+                        overlay.classList.add('is-clearing');
+                        queueTimeout(() => {
+                            overlay.remove();
+                            pruneHostIfIdle();
+                        }, 500);
+                    }, 7700); /* jumpscare lasts 2s */
+                } else {
+                    /* Intermediate hit — fade out and reappear elsewhere */
+                    const hitMsg = requiredHits - wraithHits === 1
+                        ? 'A hit! The wraith wavers\u2026 one more strike!'
+                        : `A hit! The wraith shimmers and vanishes\u2026 (${wraithHits}/${requiredHits})`;
+                    showToast(hitMsg, 'info', 2000);
+                    queueTimeout(() => {
+                        wraithImg.classList.add('is-fading');
+                        ghostTrails.forEach((t) => t.classList.remove('is-visible'));
+                        wraithWrapper.classList.remove('is-ghost-active');
+                    }, 500);
+                    queueTimeout(() => {
+                        wraithImg.classList.remove('is-fading');
+                        wraithImg.style.opacity = '0';
+                        relocateWraith();
+                        /* Fade back in at new position */
+                        void wraithImg.offsetWidth;
+                        wraithImg.style.transition = 'opacity 1.2s ease';
+                        wraithImg.style.opacity = '1';
+                        queueTimeout(() => {
+                            ghostTrails.forEach((t) => t.classList.add('is-visible'));
+                            wraithWrapper.classList.add('is-ghost-active');
+                        }, 400);
+                        queueTimeout(() => {
+                            wraithImg.style.transition = '';
+                        }, 1300);
+                    }, 1200);
+                }
+            }
+        };
+        document.addEventListener('click', wraithClickHandler, true);
+
+        effectCleanup = () => {
+            document.body.classList.remove('fantasy-wraith-hunt-active');
+            document.removeEventListener('click', wraithClickHandler, true);
+        };
+    };
+
+    /* ── Gelatinous Cube backlash: slides across screen, captures buttons ── */
+    const spawnGelatinousCube = () => {
+        const trailLayer = document.createElement('div');
+        trailLayer.className = 'fantasy-gelcube-trail-layer';
+        host.appendChild(trailLayer);
+        let lastTrailPos = null;
+        let currentPathAngle = null;
+        /* Trail segment sizing — match the cube's rendered size.
+           Image aspect is 1536:1024 = 1.5:1.  segH = cubeSize, segW = cubeSize * 1.5.
+           Place a new segment every ~60% of segW so ends overlap for continuity. */
+        const trailCubeSize = Math.min(560, window.innerWidth * 0.8);
+        const trailSegH = trailCubeSize;
+        const trailSegW = trailCubeSize * 1.5;
+        const trailPlaceInterval = trailSegW * 0.55;
+
+        const cube = document.createElement('div');
+        cube.className = 'fantasy-gelcube-backlash';
+        cube.innerHTML = `
+            <img class="fantasy-gelcube-img" src="${backlashAssets.gelatinousCube}" alt="" draggable="false">
+            <div class="fantasy-gelcube-captured"></div>
+        `;
+        host.appendChild(cube);
+
+        const cubeImg = cube.querySelector('.fantasy-gelcube-img');
+        const capturedContainer = cube.querySelector('.fantasy-gelcube-captured');
+        cube.dataset.capturedCount = '0';
+        cube.style.left = '-9999px';
+        cube.style.top = '-9999px';
+        cube.style.opacity = '0';
+
+        const removeTrailLayer = () => {
+            trailLayer.remove();
+            pruneHostIfIdle();
+        };
+
+        /** Fade the trail layer out after the cube is defeated */
+        const beginTrailFade = () => {
+            trailLayer.classList.add('is-fading');
+            queueTimeout(() => removeTrailLayer(), 2600);
+        };
+
+        const isElementInViewport = (rect) => rect.width > 0
+            && rect.height > 0
+            && rect.right > 0
+            && rect.bottom > 0
+            && rect.left < window.innerWidth
+            && rect.top < window.innerHeight;
+
+        const nextCaptureAngle = () => (generator.randomInt(-180, 180) / 10).toFixed(1);
+        const gelCubeTargetCaptureCount = 18;
+
+        /** Place slime trail image segments along the cube's path.
+            Uses the path's fixed angle so all segments on a given path are
+            perfectly aligned.  Anchor advances by exactly trailPlaceInterval
+            along that angle each time, ensuring even spacing and no wobble. */
+        const drawTrailStreak = () => {
+            const cubeRect = cube.getBoundingClientRect();
+            if (cubeRect.width <= 0 || cubeRect.height <= 0) return;
+
+            const cx = cubeRect.left + cubeRect.width / 2;
+            const cy = cubeRect.top + cubeRect.height * 0.7;
+
+            if (lastTrailPos) {
+                const dx = cx - lastTrailPos.x;
+                const dy = cy - lastTrailPos.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                /* Lock the angle on the first movement of this path segment */
+                if (currentPathAngle === null && dist > 4) {
+                    currentPathAngle = Math.atan2(dy, dx);
+                }
+
+                /* Place segments at fixed intervals along the locked angle */
+                if (currentPathAngle !== null && dist >= trailPlaceInterval) {
+                    const angleDeg = currentPathAngle * (180 / Math.PI);
+                    const seg = document.createElement('img');
+                    seg.className = 'fantasy-gelcube-trail-segment';
+                    seg.src = backlashAssets.slimeTrail;
+                    seg.alt = '';
+                    seg.draggable = false;
+                    seg.style.left = lastTrailPos.x + 'px';
+                    seg.style.top = (lastTrailPos.y - trailSegH / 2) + 'px';
+                    seg.style.width = trailSegW + 'px';
+                    seg.style.height = trailSegH + 'px';
+                    seg.style.transform = 'rotate(' + angleDeg + 'deg)';
+                    trailLayer.appendChild(seg);
+                    /* Fade in after a frame so the CSS transition activates */
+                    requestAnimationFrame(() => seg.classList.add('is-visible'));
+                    /* Advance anchor by exactly trailPlaceInterval along the path angle */
+                    lastTrailPos = {
+                        x: lastTrailPos.x + Math.cos(currentPathAngle) * trailPlaceInterval,
+                        y: lastTrailPos.y + Math.sin(currentPathAngle) * trailPlaceInterval
+                    };
+                }
+            } else {
+                lastTrailPos = { x: cx, y: cy };
+            }
+        };
+
+        const captureSelectors = [
+            'button',
+            'a.button',
+            'a.btn',
+            '.btn',
+            '.button',
+            '.btn-submit',
+            '.btn-reset',
+            '.btn-enter',
+            '.btn-challenge',
+            '.table-action-btn',
+            '[role="button"]',
+            '.nav-item',
+            '.nav-child-item',
+            '.topnav-item',
+            '.lefttop-sidebar-item',
+            '.ribbon-tab',
+            '.page-chip',
+            '.app-header-chip',
+            '.benchmark-chip',
+            '.dashboard-chip',
+            '.inline-alert-action-btn',
+            '.inline-alert-dismiss',
+            '.info-icon',
+            '.search-icon',
+            '.hub-action-icon',
+            '.cmdpalette-result-icon',
+            '.status-icon',
+            '.alert-icon',
+            '.session-timeout-icon'
+        ].join(', ');
+        const iconHintPattern = /(icon|glyph|sigil|chip|status|search|dismiss)/i;
+        const hasSvgOnlyContent = (node) => node.children.length > 0
+            && Array.from(node.children).every((child) => child.tagName === 'svg' || child.tagName === 'SVG');
+        const getCaptureKind = (node, rect) => {
+            const label = (node.textContent || '').trim();
+            if (
+                rect.width <= 48
+                || rect.height <= 32
+                || iconHintPattern.test(node.className || '')
+                || (label.length > 0 && label.length <= 3)
+                || hasSvgOnlyContent(node)
+            ) {
+                return 'icon';
+            }
+            if (/(nav-item|sidebar|topnav|lefttop)/i.test(node.className || '')) {
+                return 'nav';
+            }
+            return 'control';
+        };
+        const getCaptureLabel = (node, kind) => {
+            const aria = (node.getAttribute('aria-label') || node.getAttribute('title') || '').trim();
+            const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+            if (kind === 'icon') {
+                if (text.length > 0 && text.length <= 3) return text.slice(0, 3);
+                if (aria.length > 0) return aria.slice(0, 2).toUpperCase();
+                const iconGlyphs = ['✦', '◆', '✧', '✹', '◈', '✷'];
+                return generator.randomFromArray(iconGlyphs);
+            }
+            if (text.length > 0) return text.slice(0, 28);
+            if (aria.length > 0) return aria.slice(0, 28);
+            return kind === 'nav' ? 'Route' : 'Button';
+        };
+
+        /* Collect visible, on-screen controls so the cube captures real affordances. */
+        const gatherButtons = () => Array.from(document.querySelectorAll(captureSelectors)).filter((btn) => {
+            if (!(btn instanceof HTMLElement)) return false;
+            if (btn.closest('.fantasy-gelcube-backlash')) return false;
+            if (btn.closest('.fantasy-spell-penalty-host')) return false;
+            if (btn.closest('#fantasy-spell-host')) return false;
+            if (btn.closest('.modal-overlay')) return false;
+            if (btn.closest('.toast')) return false;
+            if (btn.classList.contains('benchmark-strip')) return false;
+            if (btn.dataset.gelcubeCaptured === 'true') return false;
+            if (btn.hasAttribute('disabled') || btn.getAttribute('aria-disabled') === 'true') return false;
+            const rect = btn.getBoundingClientRect();
+            if (!isElementInViewport(rect)) return false;
+            if ((rect.width * rect.height) > 48000) return false;
+            const label = (btn.textContent || btn.getAttribute('aria-label') || btn.getAttribute('title') || '').trim();
+            return label.length > 0 || hasSvgOnlyContent(btn) || iconHintPattern.test(btn.className || '');
+        });
+        let allButtons = gatherButtons();
+        const capturedSet = new Set();
+        const originalButtonData = [];
+
+        const captureButton = (btn) => {
+            if (!(btn instanceof HTMLElement) || capturedSet.has(btn)) return false;
+            capturedSet.add(btn);
+            originalButtonData.push({
+                el: btn,
+                origStyles: btn.getAttribute('style') || ''
+            });
+
+            const clone = document.createElement('div');
+            const rect = btn.getBoundingClientRect();
+            const computed = window.getComputedStyle(btn);
+            const captureKind = getCaptureKind(btn, rect);
+            const label = getCaptureLabel(btn, captureKind);
+            const fragment = document.createElement('div');
+            const rawMarkup = (btn.innerHTML || '').trim();
+            clone.className = 'fantasy-gelcube-captured-btn';
+            clone.dataset.kind = captureKind;
+            clone.style.transform = `rotate(${nextCaptureAngle()}deg)`;
+            clone.style.width = captureKind === 'icon'
+                ? `${Math.max(34, Math.min(58, Math.round(Math.max(rect.width, rect.height) || 42)))}px`
+                : `${Math.max(84, Math.min(captureKind === 'nav' ? 210 : 190, Math.round(rect.width || 140)))}px`;
+
+            fragment.className = 'fantasy-gelcube-fragment';
+            fragment.dataset.kind = captureKind;
+            fragment.setAttribute('aria-hidden', 'true');
+            if (rawMarkup) {
+                fragment.innerHTML = rawMarkup;
+            } else {
+                fragment.textContent = label;
+            }
+            fragment.querySelectorAll('[id]').forEach((node) => node.removeAttribute('id'));
+            fragment.querySelectorAll('[for]').forEach((node) => node.removeAttribute('for'));
+            fragment.querySelectorAll('input, textarea, select').forEach((node) => node.remove());
+            fragment.querySelectorAll('*').forEach((node) => {
+                if (!(node instanceof HTMLElement)) return;
+                node.style.pointerEvents = 'none';
+                node.removeAttribute('tabindex');
+                node.setAttribute('aria-hidden', 'true');
+            });
+
+            fragment.style.color = computed.color;
+            fragment.style.fontSize = computed.fontSize;
+            fragment.style.fontWeight = computed.fontWeight;
+            fragment.style.fontFamily = computed.fontFamily;
+            fragment.style.letterSpacing = computed.letterSpacing;
+            fragment.style.lineHeight = computed.lineHeight;
+            fragment.style.textTransform = computed.textTransform;
+            fragment.style.justifyContent = computed.justifyContent !== 'normal' ? computed.justifyContent : 'center';
+            fragment.style.alignItems = computed.alignItems !== 'normal' ? computed.alignItems : 'center';
+            fragment.style.gap = computed.gap !== 'normal' ? computed.gap : '6px';
+            fragment.style.padding = captureKind === 'icon' ? '0' : computed.padding;
+            fragment.style.borderRadius = computed.borderRadius !== '0px'
+                ? computed.borderRadius
+                : (captureKind === 'icon' ? '50%' : (captureKind === 'nav' ? '10px' : '999px'));
+            fragment.style.border = computed.border !== '0px none rgb(0, 0, 0)'
+                ? computed.border
+                : `1px solid ${captureKind === 'icon' ? 'rgba(163, 255, 174, 0.7)' : 'rgba(80, 200, 100, 0.4)'}`;
+            fragment.style.backgroundColor = computed.backgroundColor !== 'rgba(0, 0, 0, 0)'
+                ? computed.backgroundColor
+                : (captureKind === 'icon' ? 'rgba(10, 42, 26, 0.88)' : 'rgba(22, 70, 34, 0.74)');
+            if (computed.backgroundImage && computed.backgroundImage !== 'none') {
+                fragment.style.backgroundImage = computed.backgroundImage;
+            }
+            fragment.style.boxShadow = computed.boxShadow !== 'none'
+                ? computed.boxShadow
+                : '0 10px 18px rgba(10, 30, 16, 0.35)';
+            fragment.style.minHeight = captureKind === 'icon'
+                ? '100%'
+                : `${Math.max(28, Math.min(44, Math.round(rect.height || 32)))}px`;
+            fragment.style.width = '100%';
+            fragment.style.maxWidth = '100%';
+            fragment.style.boxSizing = 'border-box';
+            fragment.style.overflow = 'hidden';
+            fragment.style.whiteSpace = captureKind === 'icon' ? 'nowrap' : computed.whiteSpace;
+            fragment.style.textOverflow = 'ellipsis';
+
+            clone.appendChild(fragment);
+            capturedContainer.appendChild(clone);
+            btn.dataset.gelcubeCaptured = 'true';
+            btn.style.visibility = 'hidden';
+            btn.style.pointerEvents = 'none';
+            cube.dataset.capturedCount = String(capturedSet.size);
+            return true;
+        };
+
+        const captureButtonsInPath = () => {
+            const cubeRect = cube.getBoundingClientRect();
+            /* Skip if cube is fully off-screen */
+            if (cubeRect.right < 0 || cubeRect.left > window.innerWidth ||
+                cubeRect.bottom < 0 || cubeRect.top > window.innerHeight) return;
+            /* Re-scan for buttons each tick in case DOM changed */
+            allButtons = gatherButtons();
+            allButtons.forEach((btn) => {
+                if (capturedSet.has(btn)) return;
+                const btnRect = btn.getBoundingClientRect();
+                if (!isElementInViewport(btnRect)) return;
+                const overlap = !(btnRect.right < cubeRect.left || btnRect.left > cubeRect.right ||
+                                  btnRect.bottom < cubeRect.top || btnRect.top > cubeRect.bottom);
+                if (overlap) {
+                    captureButton(btn);
+                }
+            });
+        };
+
+        const restoreButtons = () => {
+            originalButtonData.forEach(({ el, origStyles }, i) => {
+                delete el.dataset.gelcubeCaptured;
+                el.style.cssText = origStyles;
+                /* Fade back in instead of popping */
+                el.style.opacity = '0';
+                el.style.transition = 'opacity 0.8s ease';
+                const delay = Math.min(i * 60, 600);
+                queueTimeout(() => {
+                    el.style.opacity = '1';
+                    /* Clean up inline transition after animation */
+                    queueTimeout(() => {
+                        el.style.removeProperty('opacity');
+                        el.style.removeProperty('transition');
+                    }, 900);
+                }, delay);
+            });
+        };
+
+        /* Slide paths — fully off-screen start/end so cube traverses entire viewport.
+           Using vw/vh-relative pixel positions instead of % for precise off-screen placement. */
+        const cubeSize = Math.min(560, window.innerWidth * 0.8);
+        const clampTop = (value) => Math.max(16, Math.min(value, window.innerHeight - cubeSize - 16));
+        const offL = -cubeSize - 20;                        /* fully off left/top */
+        const offR = window.innerWidth + 20;                /* fully off right */
+        const offB = window.innerHeight + 20;               /* fully off bottom */
+        const centerX = (window.innerWidth - cubeSize) / 2;
+        const centerY = clampTop((window.innerHeight - cubeSize) / 2);
+        const toolbarY = clampTop(window.innerHeight * 0.08);
+        const upperSweepY = clampTop(window.innerHeight * 0.28);
+        const lowerSweepY = clampTop(window.innerHeight * 0.46);
+
+        const paths = [
+            { from: { x: offL, y: toolbarY },    to: { x: offR, y: toolbarY } },    /* header sweep */
+            { from: { x: offR, y: upperSweepY }, to: { x: offL, y: lowerSweepY } },  /* mid sweep */
+            { from: { x: offL, y: offB },        to: { x: offR, y: offL } },         /* BL → TR */
+            { from: { x: offR, y: offL },        to: { x: centerX, y: centerY } }    /* TR → center */
+        ];
+        const slideDurationMs = 2800;
+
+        const animatePath = (pathIndex, onDone) => {
+            const p = paths[pathIndex];
+            cube.style.transition = 'none';
+            cube.style.opacity = '1';
+            cube.style.left = p.from.x + 'px';
+            cube.style.top = p.from.y + 'px';
+            void cube.offsetWidth;
+            cube.style.transition = `left ${slideDurationMs}ms cubic-bezier(0.25, 0.46, 0.45, 0.94), top ${slideDurationMs}ms cubic-bezier(0.25, 0.46, 0.45, 0.94)`;
+            cube.style.left = p.to.x + 'px';
+            cube.style.top = p.to.y + 'px';
+
+            /* Capture buttons during slide */
+            captureButtonsInPath();
+            drawTrailStreak();
+            const captureInterval = setInterval(captureButtonsInPath, 90);
+            const trailInterval = setInterval(drawTrailStreak, 30);
+            timers.push(captureInterval);
+            timers.push(trailInterval);
+            queueTimeout(() => {
+                clearInterval(captureInterval);
+                clearInterval(trailInterval);
+                captureButtonsInPath();
+                drawTrailStreak();
+                lastTrailPos = null;  /* gap between path segments */
+                currentPathAngle = null;
+                onDone();
+            }, slideDurationMs + 150);
+        };
+
+        /* Force-capture buttons that overlap won't always catch during animation.
+           As a fallback, grab visible buttons regardless of overlap. */
+        const forceCaptureFallback = () => {
+            const cubeRect = cube.getBoundingClientRect();
+            const cubeCenterX = cubeRect.left + cubeRect.width / 2;
+            const cubeCenterY = cubeRect.top + cubeRect.height / 2;
+            const fresh = gatherButtons().sort((leftBtn, rightBtn) => {
+                const leftRect = leftBtn.getBoundingClientRect();
+                const rightRect = rightBtn.getBoundingClientRect();
+                const leftDistance = Math.hypot(
+                    leftRect.left + leftRect.width / 2 - cubeCenterX,
+                    leftRect.top + leftRect.height / 2 - cubeCenterY
+                );
+                const rightDistance = Math.hypot(
+                    rightRect.left + rightRect.width / 2 - cubeCenterX,
+                    rightRect.top + rightRect.height / 2 - cubeCenterY
+                );
+                return leftDistance - rightDistance;
+            });
+            const neededCount = Math.max(0, Math.min(gelCubeTargetCaptureCount, fresh.length) - capturedSet.size);
+            const toCapture = fresh.slice(0, neededCount);
+            toCapture.forEach((btn) => {
+                captureButton(btn);
+            });
+        };
+
+        const runPaths = (index) => {
+            if (index >= paths.length) {
+                /* All paths done — ensure we captured some buttons, then fight */
+                forceCaptureFallback();
+                cube.classList.add('is-vulnerable');
+                document.body.classList.add('fantasy-gelcube-hunt-active');
+                showToast('The gelatinous cube stops. Strike it three times!', 'warning', 3000);
+                return;
+            }
+            animatePath(index, () => {
+                queueTimeout(() => runPaths(index + 1), 200);
+            });
+        };
+
+        showToast('A gelatinous cube oozes into the chamber!', 'warning', 2400);
+        queueTimeout(() => runPaths(0), 400);
+
+        /* Sword click to slay cube */
+        let cubeHits = 0;
+        const requiredHits = 3;
+
+        const cubeClickHandler = (event) => {
+            if (!cube.classList.contains('is-vulnerable')) return;
+            const rect = cube.getBoundingClientRect();
+            const x = event.clientX;
+            const y = event.clientY;
+            if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+                event.preventDefault();
+                event.stopPropagation();
+                cubeHits++;
+                cube.dataset.hits = String(cubeHits);
+                cubeImg.classList.remove('is-struck');
+                void cubeImg.offsetWidth;
+                cubeImg.classList.add('is-struck');
+                queueTimeout(() => cubeImg.classList.remove('is-struck'), 300);
+
+                if (cubeHits >= requiredHits) {
+                    document.body.classList.remove('fantasy-gelcube-hunt-active');
+                    document.removeEventListener('click', cubeClickHandler, true);
+                    cube.classList.add('is-dying');
+                    showToast('The gelatinous cube dissolves! Captured controls are released.', 'success', 2400);
+                    queueTimeout(() => {
+                        restoreButtons();
+                        cube.classList.add('is-clearing');
+                        queueTimeout(() => {
+                            cube.remove();
+                            beginTrailFade();
+                            pruneHostIfIdle();
+                        }, 500);
+                    }, 800);
+                } else {
+                    showToast(`Hit ${cubeHits} of ${requiredHits}! Keep striking!`, 'info', 1400);
+                }
+            }
+        };
+        document.addEventListener('click', cubeClickHandler, true);
+
+        effectCleanup = () => {
+            document.body.classList.remove('fantasy-gelcube-hunt-active');
+            document.removeEventListener('click', cubeClickHandler, true);
+            restoreButtons();
+            trailLayer.remove();
+        };
+    };
+
     switch (selectedEffect) {
         case 'popups':
             spawnPopups();
@@ -1946,6 +3131,12 @@ function triggerFantasySpellPenalty(spell, reason = 'faded', options = {}) {
         case 'lantern-blackout':
             spawnLanternBlackout();
             break;
+        case 'wraith':
+            spawnWraith();
+            break;
+        case 'gelatinous-cube':
+            spawnGelatinousCube();
+            break;
         default:
             spawnPopups();
             break;
@@ -1962,7 +3153,9 @@ function triggerFantasySpellPenalty(spell, reason = 'faded', options = {}) {
         'living-scroll': 'A living scroll claws at the chamber and drags the page with it.',
         'summoning-circle': 'A summoning circle locks into place beneath the interface.',
         'ink-spill': 'A cursed inkpot topples from above and floods the workbench.',
-        'lantern-blackout': 'The lantern light dies and something begins to grin in the dark.'
+        'lantern-blackout': 'The lantern light dies and something begins to grin in the dark.',
+        'wraith': 'A wraith seeps through the walls and the chamber grows cold.',
+        'gelatinous-cube': 'A gelatinous cube oozes into the chamber and begins absorbing everything in its path.'
     };
     signalFantasyMechanicCue('spell_faded', effectMessages[selectedEffect] || 'The failed ward lashes back with chaos and fire.', {
         path: state.currentPage,
@@ -2006,59 +3199,115 @@ function buildFantasySpellDecoys(generator, realCode, count = 3) {
 }
 
 /* ─────────────────────────────────────────────────────────────────
- * Spell Tier System — ramps difficulty based on cast count.
- *   Tier 1  Cantrip     (casts 0-1)  — single dismiss popup
- *   Tier 2  Ward        (casts 2-3)  — rune selection + decoy close
- *   Tier 3  Hex         (casts 4-5)  — scrollable grimoire + code entry
- *   Tier 4  Ritual      (casts 6-7)  — stacked modals + selection + code
- *   Tier 5  Conjuration (casts 8+)   — full gauntlet (banner + stacked + scroll + code)
+ * Interrupt Challenge Tier System — ramps difficulty based on cast
+ * count. In fantasy mode tiers escalate and cap at conjuration.
+ * In enterprise mode tiers cycle back after hitting the cap.
+ *
+ *   Tier 1  cantrip     (Quickcheck)    — single dismiss popup
+ *   Tier 2  ward        (Verification)  — selection + decoy close
+ *   Tier 3  hex         (Compliance)    — scrollable doc + code entry
+ *   Tier 4  ritual      (Audit)         — stacked modals + selection + code
+ *   Tier 5  conjuration (Full Review)   — full gauntlet
  * ───────────────────────────────────────────────────────────────── */
-function getFantasySpellTier(castCount = 0) {
-    if (castCount <= 1) return 'cantrip';
-    if (castCount <= 3) return 'ward';
-    if (castCount <= 5) return 'hex';
-    if (castCount <= 7) return 'ritual';
-    return 'conjuration';
+const INTERRUPT_TIER_ORDER = ['cantrip', 'ward', 'hex', 'ritual', 'conjuration'];
+
+function getInterruptChallengeTier(castCount = 0, config = {}) {
+    const { maxTier = 5, cycling = false } = config;
+    const cappedTiers = INTERRUPT_TIER_ORDER.slice(0, maxTier);
+    if (!cappedTiers.length) return 'cantrip';
+
+    if (cycling) {
+        return cappedTiers[castCount % cappedTiers.length];
+    }
+    /* Fantasy-style escalation: ramp up and stay at top */
+    if (castCount <= 1) return cappedTiers[Math.min(0, cappedTiers.length - 1)];
+    if (castCount <= 3) return cappedTiers[Math.min(1, cappedTiers.length - 1)];
+    if (castCount <= 5) return cappedTiers[Math.min(2, cappedTiers.length - 1)];
+    if (castCount <= 7) return cappedTiers[Math.min(3, cappedTiers.length - 1)];
+    return cappedTiers[cappedTiers.length - 1];
 }
 
-function getFantasySpellTierLabel(tier = 'cantrip') {
-    const labels = {
+/* Legacy alias — delegates to new system with fantasy defaults. */
+function getFantasySpellTier(castCount = 0) {
+    return getInterruptChallengeTier(castCount, { maxTier: 5, cycling: false });
+}
+
+const INTERRUPT_TIER_LABELS = {
+    fantasy: {
         cantrip: 'Cantrip',
         ward: 'Ward',
         hex: 'Hex',
         ritual: 'Ritual',
         conjuration: 'Grand Conjuration'
-    };
+    },
+    enterprise: {
+        cantrip: 'Quick Check',
+        ward: 'Verification',
+        hex: 'Compliance Audit',
+        ritual: 'Security Review',
+        conjuration: 'Full Compliance Review'
+    }
+};
+
+function getInterruptTierLabel(tier = 'cantrip', isFantasy = false) {
+    const labels = isFantasy ? INTERRUPT_TIER_LABELS.fantasy : INTERRUPT_TIER_LABELS.enterprise;
     return labels[tier] || labels.cantrip;
+}
+
+function getFantasySpellTierLabel(tier = 'cantrip') {
+    const isFantasy = !!(state.currentInstance && state.currentInstance.isFantasy);
+    return getInterruptTierLabel(tier, isFantasy);
 }
 
 function buildFantasySpell(instance = state.currentInstance, castCount = 0) {
     const sessionKey = (state.benchmark && state.benchmark.startedAt) || Date.now();
     const generator = createInstanceScopedGenerator(instance, `spell-${sessionKey}-${castCount}`);
-    const tier = getFantasySpellTier(castCount);
-    const titles = {
+    const isFantasy = !!(instance && instance.isFantasy);
+    const challengeConfig = getInterruptChallengeConfig(instance);
+    const tier = getInterruptChallengeTier(castCount, challengeConfig);
+
+    const fantasyTitles = {
         cantrip: ['Flickering Charm', 'Ember Wisp', 'Minor Hex', 'Spark Ward'],
         ward: ['Sigil Lock', 'Rune Barrier', 'Warding Glyph', 'Phantom Seal'],
         hex: ['Cascading Parchment', 'Archivist Drift', 'Creeping Fog Hex', 'Long Scroll Curse'],
         ritual: ['Rite of Three Seals', 'Layered Enchantment', 'Phantom Assembly', 'Stacked Binding'],
         conjuration: ['Grand Conjuration', 'The Full Gauntlet', 'Archmage Trial', 'Siege of Wards']
     };
-    const prompts = {
+    const enterpriseTitles = {
+        cantrip: ['Session Timeout Warning', 'Identity Reconfirmation', 'Quick Security Check', 'Idle Session Prompt'],
+        ward: ['MFA Verification Required', 'Access Token Renewal', 'Credential Verification', 'Policy Acknowledgment'],
+        hex: ['Compliance Audit Notice', 'Regulatory Review Required', 'Data Handling Certification', 'Audit Trail Verification'],
+        ritual: ['Multi-Factor Security Review', 'Escalated Access Approval', 'Cross-Department Authorization', 'Layered Compliance Gate'],
+        conjuration: ['Full Compliance Review', 'Enterprise Security Audit', 'Regulatory Compliance Gate', 'Mandatory Governance Check']
+    };
+    const fantasyPrompts = {
         cantrip: 'A minor spell stirs. Dismiss the disturbance to restore order.',
         ward: 'A warding glyph settles over the ledger. Select the correct rune to break the seal.',
         hex: 'A hex coils around the parchment. Scroll through the grimoire to unearth the counterspell.',
         ritual: 'A layered ritual takes hold. Dismiss each phantom seal in turn, then break the final ward.',
         conjuration: 'A grand conjuration descends. Clear the cursed pact, dismiss the phantoms, find the counterspell in the grimoire, and inscribe it to dispel the siege.'
     };
+    const enterprisePrompts = {
+        cantrip: 'Your session requires re-verification. Confirm your identity to continue.',
+        ward: 'A security policy requires additional verification. Select the correct credential to proceed.',
+        hex: 'A compliance audit has been triggered. Review the policy document to locate the authorization code.',
+        ritual: 'Multiple authorization gates have been activated. Clear each pending approval, then complete the verification step.',
+        conjuration: 'A full compliance review is in progress. Accept the terms, clear all pending approvals, locate the authorization code in the policy document, and submit it to proceed.'
+    };
+
+    const titles = isFantasy ? fantasyTitles : enterpriseTitles;
+    const prompts = isFantasy ? fantasyPrompts : enterprisePrompts;
+
     return {
         id: `spell-${Date.now()}-${castCount}`,
         castCount,
         tier,
-        tierLabel: getFantasySpellTierLabel(tier),
+        tierLabel: getInterruptTierLabel(tier, isFantasy),
         title: generator.randomFromArray(titles[tier] || titles.cantrip),
         prompt: prompts[tier] || prompts.cantrip,
         code: generateFantasySpellCode(generator),
-        revealed: false
+        revealed: false,
+        isFantasy
     };
 }
 
@@ -2078,20 +3327,35 @@ function dismissFantasySpell(reason = 'faded', options = {}) {
     clearFantasySpellUi();
     state.fantasyActiveSpell = null;
     if (!spell || quiet) return;
+    const isFantasy = !!(spell.isFantasy != null ? spell.isFantasy : state.fantasyMode);
     const message = detail || (reason === 'replaced'
-        ? 'An older ward collapsed beneath a stronger spell.'
-        : 'The spell thinned before the counterspell was woven.');
+        ? (isFantasy ? 'An older ward collapsed beneath a stronger spell.' : 'A previous challenge was superseded by a new one.')
+        : (isFantasy ? 'The spell thinned before the counterspell was woven.' : 'The verification window expired before completion.'));
     if (state.benchmark) {
         recordBenchmarkEvent('spell_faded', `${spell.title} :: ${message}`, { path: state.currentPage, spellType: spell.tier }, false);
     }
     signalFantasyMechanicCue('spell_faded', message, { path: state.currentPage, spellType: spell.tier });
-    showToast(state.fantasyMode ? message : 'The temporary challenge faded.', 'info', 3200);
-    if (reason === 'faded') {
-        triggerFantasySpellPenalty(spell, reason);
+    /* When the timer expires (faded), deduct points in ALL modes */
+    if (reason === 'faded' && state.benchmark) {
+        const tierPenalties = { cantrip: 10, ward: 15, hex: 20, ritual: 30, conjuration: 40 };
+        const penalty = tierPenalties[spell.tier] || 15;
+        state.benchmark.penalties += penalty;
+        const penaltyMsg = isFantasy
+            ? `The spell consumed ${penalty} points of your essence as it faded.`
+            : `Time expired. ${penalty} point penalty applied.`;
+        showToast(penaltyMsg, 'warning', 3200);
+        recordBenchmarkEvent('spell_timeout_penalty', `${spell.title} expired: -${penalty} pts`, { path: state.currentPage, spellType: spell.tier }, true);
+    } else {
+        showToast(message, 'info', 3200);
     }
+    /* Backlash no longer triggers on timeout — it triggers on completion in fantasy mode */
 }
 
-function completeFantasySpell(spell, detail = 'Counterspell woven. The chamber steadies.') {
+function completeFantasySpell(spell, detail) {
+    if (!detail) {
+        const isFantasy = !!(spell && spell.isFantasy != null ? spell.isFantasy : state.fantasyMode);
+        detail = isFantasy ? 'Counterspell woven. The chamber steadies.' : 'Verification complete. Access restored.';
+    }
     if (!spell || state.fantasyActiveSpell !== spell) return;
     clearFantasySpellUi();
     state.fantasyActiveSpell = null;
@@ -2100,33 +3364,57 @@ function completeFantasySpell(spell, detail = 'Counterspell woven. The chamber s
     }
     signalFantasyMechanicCue('spell_dispersed', detail, { path: state.currentPage, spellType: spell.tier });
     showToast(detail, 'success', 3600);
+    /* In fantasy mode, backlash triggers AFTER successfully completing the counterspell */
+    const isFantasy = !!(spell.isFantasy != null ? spell.isFantasy : state.fantasyMode);
+    if (isFantasy) {
+        const challengeConfig = getInterruptChallengeConfig(state.currentInstance);
+        if (challengeConfig.backlash) {
+            triggerFantasySpellPenalty(spell, 'dispersed');
+        }
+    }
 }
 
-function scheduleFantasySpellCast(delay = 60000) {
+function scheduleFantasySpellCast(delay) {
     if (state.fantasySpellCastTimer) clearTimeout(state.fantasySpellCastTimer);
-    if (!isFantasySpellcastingActive() || state.mode !== 'app') return;
+    if (!isInterruptChallengeActive() || state.mode !== 'app') return;
+    /* Don't schedule while a backlash effect is active */
+    if (state.backlashActive) return;
+    if (delay == null) {
+        const config = getInterruptChallengeConfig(state.currentInstance);
+        delay = config.intervalMs || 60000;
+    }
     state.fantasySpellCastTimer = setTimeout(() => {
         state.fantasySpellCastTimer = null;
+        /* Double-check backlash isn't active at fire time */
+        if (state.backlashActive) return;
         castFantasySpell();
     }, delay);
 }
 
 function castFantasySpell() {
-    if (!isFantasySpellcastingActive() || state.mode !== 'app') return;
+    if (!isInterruptChallengeActive() || state.mode !== 'app') return;
     if (state.fantasyActiveSpell) {
         dismissFantasySpell('replaced', { quiet: true });
     }
     const spell = buildFantasySpell(state.currentInstance, state.fantasySpellCastCount || 0);
+    const isFantasy = !!(spell.isFantasy);
     state.fantasySpellCastCount = (state.fantasySpellCastCount || 0) + 1;
     state.fantasyActiveSpell = spell;
-    applyFantasyAdversarialCopyShift();
+    if (isFantasy) applyFantasyAdversarialCopyShift();
     renderFantasySpell(spell);
     if (state.benchmark) {
         recordBenchmarkEvent('spell_cast', `${spell.title} (${spell.tierLabel})`, { path: state.currentPage, spellType: spell.tier }, false);
     }
-    signalFantasyMechanicCue('spell_cast', `${spell.title} settles over the ledger.`, { path: state.currentPage, spellType: spell.tier });
-    showToast(`${spell.title} grips the chamber. Dispel it to continue.`, 'warning', 4200);
-    scheduleFantasySpellCast(60000);
+    const cueMsg = isFantasy
+        ? `${spell.title} settles over the ledger.`
+        : `${spell.title} requires your attention.`;
+    signalFantasyMechanicCue('spell_cast', cueMsg, { path: state.currentPage, spellType: spell.tier });
+    const toastMsg = isFantasy
+        ? `${spell.title} grips the chamber. Dispel it to continue.`
+        : `${spell.title} — complete the verification to continue.`;
+    showToast(toastMsg, 'warning', 4200);
+    const config = getInterruptChallengeConfig(state.currentInstance);
+    scheduleFantasySpellCast(config.intervalMs || 60000);
 }
 
 /* ─────────────────────────────────────────────────────────────────
@@ -2143,6 +3431,7 @@ function renderFantasySpell(spell) {
     const cleanupFns = [];
     const addCleanup = (fn) => cleanupFns.push(fn);
     const generator = createInstanceScopedGenerator(state.currentInstance, `spell-ui-${spell.id}`);
+    const isFantasy = !!(spell.isFantasy != null ? spell.isFantasy : (state.currentInstance && state.currentInstance.isFantasy));
 
     // Shuffle helper
     const shuffle = (arr) => {
@@ -2173,7 +3462,7 @@ function renderFantasySpell(spell) {
         timerBar.style.width = pct + '%';
         if (pct <= 0) {
             clearInterval(timerInterval);
-            dismissFantasySpell('faded', { detail: 'The spell expired. The enchantment fades on its own.' });
+            dismissFantasySpell('faded', { detail: isFantasy ? 'The spell expired. The enchantment fades on its own.' : 'Verification window expired. The challenge has timed out.' });
         }
     }, 200);
     addCleanup(() => clearInterval(timerInterval));
@@ -2241,7 +3530,7 @@ function renderFantasySpell(spell) {
         if (closeBtn) {
             const handler = () => {
                 if (decoyClose) {
-                    showToast('That seal is a decoy. Look for the real way to dismiss this phantom.', 'warning', 2800);
+                    showToast(isFantasy ? 'That seal is a decoy. Look for the real way to dismiss this phantom.' : 'That control is disabled. Use the correct action to proceed.', 'warning', 2800);
                 } else if (onClose) {
                     onClose(modal);
                 }
@@ -2258,15 +3547,15 @@ function renderFantasySpell(spell) {
     function createCodeEntry(container) {
         revealBox = document.createElement('div');
         revealBox.className = 'spell-reveal-box';
-        revealBox.textContent = 'Counterspell hidden';
+        revealBox.textContent = isFantasy ? 'Counterspell hidden' : 'Authorization code pending';
         container.appendChild(revealBox);
 
         const entryDiv = document.createElement('div');
         entryDiv.className = 'spell-code-entry';
         entryDiv.innerHTML = `
-            <input type="text" class="spell-code-input" maxlength="6" autocomplete="off" spellcheck="false" placeholder="Inscribe runes" aria-label="Enter counterspell code">
-            <button type="button" class="spell-btn spell-btn-primary">Dispel</button>
-            <button type="button" class="spell-btn">Let It Fade</button>
+            <input type="text" class="spell-code-input" maxlength="6" autocomplete="off" spellcheck="false" placeholder="${isFantasy ? 'Inscribe runes' : 'Enter code'}" aria-label="${isFantasy ? 'Enter counterspell code' : 'Enter authorization code'}">
+            <button type="button" class="spell-btn spell-btn-primary">${isFantasy ? 'Dispel' : 'Submit'}</button>
+            <button type="button" class="spell-btn">${isFantasy ? 'Let It Fade' : 'Dismiss'}</button>
         `;
         container.appendChild(entryDiv);
 
@@ -2278,9 +3567,9 @@ function renderFantasySpell(spell) {
         const keyHandler = (e) => { if (e.key === 'Enter') { e.preventDefault(); trySubmit(); } };
         const trySubmit = () => {
             if (normalizeFantasySpellCode(codeInput.value) === spell.code) {
-                completeFantasySpell(spell, 'Counterspell woven. The enchantment shatters!');
+                completeFantasySpell(spell, isFantasy ? 'Counterspell woven. The enchantment shatters!' : 'Authorization code accepted. Access restored.');
             } else {
-                showToast('Those runes fail to dispel the magic. Try again.', 'warning', 2400);
+                showToast(isFantasy ? 'Those runes fail to dispel the magic. Try again.' : 'Invalid authorization code. Please try again.', 'warning', 2400);
                 codeInput.select();
             }
         };
@@ -2312,9 +3601,9 @@ function renderFantasySpell(spell) {
         }
     }
 
-    // Helper: grimoire with hidden rune (for hex/conjuration tiers)
+    // Helper: grimoire / policy doc with hidden code (for hex/conjuration tiers)
     function createGrimoire(container, lineCount = 20) {
-        const loreLines = [
+        const fantasyLoreLines = [
             'The archivist notes another ward, another seal, another name.',
             'Dust settles on the parchment as the ink dries slowly.',
             'A raven perches above the doorway, watching the quill move.',
@@ -2331,13 +3620,32 @@ function renderFantasySpell(spell) {
             'Footnote 14 references a sealed chamber beneath the observatory.',
             'The appendix contains nothing but blank pages and a single glyph.'
         ];
+        const enterpriseLoreLines = [
+            'All users must re-authenticate after 30 minutes of inactivity per Policy 4.2.1.',
+            'Data classified as Restricted requires two-factor verification before export.',
+            'Section 7.3: Cross-departmental access requests must include manager sign-off.',
+            'Audit logs are retained for 7 years in accordance with regulatory requirements.',
+            'Encryption at rest is mandatory for all personally identifiable information (PII).',
+            'Password rotation policy: minimum 90-day cycle, no reuse of last 12 passwords.',
+            'Access reviews are conducted quarterly by the Security Operations team.',
+            'Incident response SLA: critical issues must be acknowledged within 15 minutes.',
+            'Third-party integrations require a completed vendor risk assessment on file.',
+            'Role-based access control (RBAC) must follow the principle of least privilege.',
+            'All API tokens expire after 24 hours unless explicitly renewed by an admin.',
+            'Data residency requirements vary by region. Consult the compliance matrix.',
+            'Change management requests require approval from at least two stakeholders.',
+            'Session tokens must be invalidated upon logout or browser close.',
+            'Annual compliance training must be completed by all employees before Q4.'
+        ];
+        const loreLines = isFantasy ? fantasyLoreLines : enterpriseLoreLines;
+        const codeLabel = isFantasy ? 'Counterspell' : 'Authorization Code';
         const grimoire = document.createElement('div');
         grimoire.className = 'spell-grimoire';
         let lines = '';
         const runePosition = generator.randomInt(Math.floor(lineCount * 0.7), lineCount - 1);
         for (let i = 0; i < lineCount; i++) {
             if (i === runePosition) {
-                lines += `<div class="spell-grimoire-line is-rune">Counterspell: ${spell.code}</div>`;
+                lines += `<div class="spell-grimoire-line is-rune">${codeLabel}: ${spell.code}</div>`;
             } else {
                 lines += `<div class="spell-grimoire-line">Section ${i + 1} — ${loreLines[i % loreLines.length]}</div>`;
             }
@@ -2363,17 +3671,23 @@ function renderFantasySpell(spell) {
         addCleanup(() => grimoire.removeEventListener('scroll', scrollHandler));
     }
 
-    // Helper: rune radio group (for ward/ritual tiers)
+    // Helper: rune / credential radio group (for ward/ritual tiers)
     function createRuneSelection(container, onCorrect) {
-        const correctRune = generator.randomFromArray(['Aegis of Flame', 'Warden\'s Sigil', 'Lunar Ward', 'Ember Seal']);
-        const decoyRunes = shuffle(['Shadow Bind', 'Hollow Glyph', 'Broken Crest', 'Fading Mark', 'Phantom Trace', 'Ash Rune'])
-            .slice(0, generator.randomInt(3, 5));
+        const fantasyCorrectOptions = ['Aegis of Flame', 'Warden\'s Sigil', 'Lunar Ward', 'Ember Seal'];
+        const fantasyDecoyOptions = ['Shadow Bind', 'Hollow Glyph', 'Broken Crest', 'Fading Mark', 'Phantom Trace', 'Ash Rune'];
+        const enterpriseCorrectOptions = ['Active Directory SSO', 'Hardware Token (YubiKey)', 'Biometric Verification', 'Certificate-Based Auth'];
+        const enterpriseDecoyOptions = ['Expired Session Token', 'Legacy LDAP Bind', 'Deprecated API Key', 'Unsigned JWT', 'Plaintext Password Hash', 'Guest Access Token'];
+
+        const correctRune = generator.randomFromArray(isFantasy ? fantasyCorrectOptions : enterpriseCorrectOptions);
+        const decoyPool = isFantasy ? fantasyDecoyOptions : enterpriseDecoyOptions;
+        const decoyRunes = shuffle(decoyPool).slice(0, generator.randomInt(3, 5));
         const allRunes = shuffle([correctRune, ...decoyRunes]);
+        const ariaLabel = isFantasy ? 'Select the correct rune' : 'Select the correct authentication method';
 
         const group = document.createElement('div');
         group.className = 'spell-rune-group';
         group.setAttribute('role', 'radiogroup');
-        group.setAttribute('aria-label', 'Select the correct rune');
+        group.setAttribute('aria-label', ariaLabel);
         allRunes.forEach(rune => {
             const opt = document.createElement('div');
             opt.className = 'spell-rune-option';
@@ -2397,34 +3711,42 @@ function renderFantasySpell(spell) {
 
         const confirmBtn = document.createElement('button');
         confirmBtn.className = 'spell-btn spell-btn-primary';
-        confirmBtn.textContent = 'Confirm Rune';
+        confirmBtn.textContent = isFantasy ? 'Confirm Rune' : 'Confirm Selection';
         confirmBtn.style.marginTop = '8px';
         container.appendChild(confirmBtn);
         const confirmHandler = () => {
             const selected = group.querySelector('.is-selected .spell-rune-label');
             if (!selected) {
-                showToast('Select a rune before confirming.', 'warning', 2000);
+                showToast(isFantasy ? 'Select a rune before confirming.' : 'Select a credential before confirming.', 'warning', 2000);
                 return;
             }
             if (selected.textContent === correctRune) {
                 onCorrect();
             } else {
-                showToast('The ward rejects that rune. Try another.', 'warning', 2400);
+                showToast(isFantasy ? 'The ward rejects that rune. Try another.' : 'Authentication failed. Select a different method.', 'warning', 2400);
             }
         };
         confirmBtn.addEventListener('click', confirmHandler);
         addCleanup(() => confirmBtn.removeEventListener('click', confirmHandler));
     }
 
-    // Helper: phantom popups to dismiss (for ritual/conjuration tiers)
+    // Helper: phantom / approval popups to dismiss (for ritual/conjuration tiers)
     function createPhantomPopups(count, onAllDismissed) {
         let dismissed = 0;
-        const phantomNames = shuffle(['Wraith of the Ledger', 'Phantom Auditor', 'Specter of Compliance', 'Ghost of the Archive', 'Shadow Clerk']);
-        const phantomMessages = [
+        const fantasyPhantomNames = ['Wraith of the Ledger', 'Phantom Auditor', 'Specter of Compliance', 'Ghost of the Archive', 'Shadow Clerk'];
+        const enterprisePhantomNames = ['Pending: IT Security Approval', 'Pending: Manager Authorization', 'Pending: Compliance Sign-Off', 'Pending: Data Privacy Review', 'Pending: Risk Assessment'];
+        const phantomNames = shuffle(isFantasy ? fantasyPhantomNames : enterprisePhantomNames);
+        const fantasyMessages = [
             'This phantom obscures the ward. Find the true way to banish it.',
             'A spectral form blocks your view. Dismiss it to proceed.',
             'The phantom lingers. It must be banished before the counterspell can surface.',
         ];
+        const enterpriseMessages = [
+            'This approval is blocking your access. Complete the required action to proceed.',
+            'An authorization gate is pending. Resolve it to continue.',
+            'This review step must be cleared before the system can grant access.',
+        ];
+        const phantomMessages = isFantasy ? fantasyMessages : enterpriseMessages;
         for (let i = 0; i < count; i++) {
             const useDecoyClose = i < count - 1; // first popups have decoy close, last one has real close
             const hasRealDismiss = true;
@@ -2435,11 +3757,11 @@ function renderFantasySpell(spell) {
             if (useDecoyClose) {
                 // Decoy close button but real dismiss via the action button
                 actionsHTML = `
-                    <button class="spell-btn is-decoy" data-decoy-dismiss>Dismiss</button>
-                    <button class="spell-btn spell-btn-primary" data-real-dismiss>Banish Spirit</button>
+                    <button class="spell-btn is-decoy" data-decoy-dismiss>${isFantasy ? 'Dismiss' : 'Skip'}</button>
+                    <button class="spell-btn spell-btn-primary" data-real-dismiss>${isFantasy ? 'Banish Spirit' : 'Approve & Clear'}</button>
                 `;
             } else {
-                actionsHTML = `<button class="spell-btn spell-btn-primary" data-real-dismiss>Banish Spirit</button>`;
+                actionsHTML = `<button class="spell-btn spell-btn-primary" data-real-dismiss>${isFantasy ? 'Banish Spirit' : 'Approve & Clear'}</button>`;
             }
 
             const modal = createModal({
@@ -2457,7 +3779,7 @@ function renderFantasySpell(spell) {
             const decoyBtn = modal.querySelector('[data-decoy-dismiss]');
             if (decoyBtn) {
                 const decoyHandler = () => {
-                    showToast('That button is cursed! Look for the true banishment.', 'warning', 2400);
+                    showToast(isFantasy ? 'That button is cursed! Look for the true banishment.' : 'That action is not authorized. Use the correct approval button.', 'warning', 2400);
                 };
                 decoyBtn.addEventListener('click', decoyHandler);
                 addCleanup(() => decoyBtn.removeEventListener('click', decoyHandler));
@@ -2478,16 +3800,23 @@ function renderFantasySpell(spell) {
         }
     }
 
-    // Helper: cursed pact banner (cookie-consent style, for conjuration tier)
+    // Helper: pact banner / terms acceptance (cookie-consent style, for conjuration tier)
     function createCursedPactBanner(onAccept) {
         const banner = document.createElement('div');
         banner.className = 'spell-banner';
-        banner.innerHTML = `
+        banner.innerHTML = isFantasy ? `
             <span class="spell-banner-icon">📜</span>
             <span class="spell-banner-text">This realm requires a binding pact. Do you accept the terms of the arcane covenant to proceed?</span>
             <div class="spell-banner-actions">
                 <button class="spell-btn" data-pact="decline">Decline</button>
                 <button class="spell-btn spell-btn-primary" data-pact="accept">Accept Pact</button>
+            </div>
+        ` : `
+            <span class="spell-banner-icon">📋</span>
+            <span class="spell-banner-text">Continued access requires acceptance of the updated Terms of Service and Data Processing Agreement (v${new Date().getFullYear()}.${generator.randomInt(1,4)}).</span>
+            <div class="spell-banner-actions">
+                <button class="spell-btn" data-pact="decline">Decline</button>
+                <button class="spell-btn spell-btn-primary" data-pact="accept">Accept Terms</button>
             </div>
         `;
         host.appendChild(banner);
@@ -2495,7 +3824,7 @@ function renderFantasySpell(spell) {
         const declineBtn = banner.querySelector('[data-pact="decline"]');
         const acceptBtn = banner.querySelector('[data-pact="accept"]');
         const declineHandler = () => {
-            showToast('The covenant persists. You must accept to continue.', 'warning', 2400);
+            showToast(isFantasy ? 'The covenant persists. You must accept to continue.' : 'You must accept the terms to continue using this application.', 'warning', 2400);
         };
         const acceptHandler = () => {
             banner.remove();
@@ -2508,21 +3837,27 @@ function renderFantasySpell(spell) {
     }
 
     /* ─── TIER RENDERING ─── */
+    const kickerPrefix = isFantasy ? 'Spell Cast' : 'Challenge';
+
     switch (spell.tier) {
 
-        /* ── Tier 1: Cantrip — single popup, click Dispel ── */
+        /* ── Tier 1: Cantrip / Quick Check — single popup, click correct button ── */
         case 'cantrip': {
             const decoys = buildFantasySpellDecoys(generator, spell.code, 2);
+            const codeStyle = isFantasy
+                ? 'font-family:Cinzel,serif;letter-spacing:0.12em;color:#f4dd98;'
+                : 'font-family:monospace;letter-spacing:0.08em;color:#2563eb;';
+            const codeLabel = isFantasy ? 'The counterspell rune is' : 'Your verification code is';
             const modal = createModal({
                 title: spell.title,
                 body: `
-                    <div class="spell-kicker">Spell Cast ${spell.castCount + 1} — ${spell.tierLabel}</div>
+                    <div class="spell-kicker">${kickerPrefix} ${spell.castCount + 1} — ${spell.tierLabel}</div>
                     <p>${spell.prompt}</p>
-                    <p>The counterspell rune is: <strong style="font-family:Cinzel,serif;letter-spacing:0.12em;color:#f4dd98;">${spell.code}</strong></p>
+                    <p>${codeLabel}: <strong style="${codeStyle}">${spell.code}</strong></p>
                 `,
                 actions: shuffle([
                     `<button class="spell-btn is-decoy" data-action="decoy">${decoys[0]}</button>`,
-                    `<button class="spell-btn spell-btn-primary" data-action="dispel">Cast ${spell.code}</button>`,
+                    `<button class="spell-btn spell-btn-primary" data-action="dispel">${isFantasy ? 'Cast' : 'Submit'} ${spell.code}</button>`,
                     `<button class="spell-btn is-decoy" data-action="decoy">${decoys[1]}</button>`,
                 ]).join(''),
                 zIndex: 12635,
@@ -2534,27 +3869,30 @@ function renderFantasySpell(spell) {
             });
 
             modal.querySelectorAll('[data-action="decoy"]').forEach(btn => {
-                const handler = () => showToast('That rune fizzles. It was a decoy.', 'warning', 2200);
+                const handler = () => showToast(isFantasy ? 'That rune fizzles. It was a decoy.' : 'Incorrect code. Please try the correct one.', 'warning', 2200);
                 btn.addEventListener('click', handler);
                 addCleanup(() => btn.removeEventListener('click', handler));
             });
             const dispelBtn = modal.querySelector('[data-action="dispel"]');
             if (dispelBtn) {
-                const handler = () => completeFantasySpell(spell, 'The cantrip dissolves. Well done!');
+                const handler = () => completeFantasySpell(spell, isFantasy ? 'The cantrip dissolves. Well done!' : 'Verification complete. Session extended.');
                 dispelBtn.addEventListener('click', handler);
                 addCleanup(() => dispelBtn.removeEventListener('click', handler));
             }
             break;
         }
 
-        /* ── Tier 2: Ward — rune radio selection + decoy X button ── */
+        /* ── Tier 2: Ward / Verification — selection + decoy X button ── */
         case 'ward': {
+            const wardHint = isFantasy
+                ? 'Select the correct warding rune below. The close button may not be what it seems.'
+                : 'Select the correct authentication method below. Some options may be expired or invalid.';
             const modal = createModal({
                 title: spell.title,
                 body: `
-                    <div class="spell-kicker">Spell Cast ${spell.castCount + 1} — ${spell.tierLabel}</div>
+                    <div class="spell-kicker">${kickerPrefix} ${spell.castCount + 1} — ${spell.tierLabel}</div>
                     <p>${spell.prompt}</p>
-                    <div class="spell-status-msg">Select the correct warding rune below. The close button may not be what it seems.</div>
+                    <div class="spell-status-msg">${wardHint}</div>
                     <div id="spell-rune-container"></div>
                 `,
                 actions: '',
@@ -2572,7 +3910,7 @@ function renderFantasySpell(spell) {
                 const bodyEl = modal.querySelector('.spell-modal-body');
                 const msg = document.createElement('div');
                 msg.className = 'spell-status-msg is-success';
-                msg.textContent = 'The correct rune glows. The counterspell surfaces.';
+                msg.textContent = isFantasy ? 'The correct rune glows. The counterspell surfaces.' : 'Authentication verified. Enter the authorization code below.';
                 bodyEl.appendChild(msg);
                 createCodeEntry(bodyEl);
                 revealCode();
@@ -2581,14 +3919,17 @@ function renderFantasySpell(spell) {
             break;
         }
 
-        /* ── Tier 3: Hex — scrollable grimoire + code entry ── */
+        /* ── Tier 3: Hex / Compliance Audit — scrollable doc + code entry ── */
         case 'hex': {
+            const hexHint = isFantasy
+                ? 'Scroll through the grimoire below to find the counterspell rune. Then inscribe it.'
+                : 'Scroll through the compliance policy below to locate the authorization code. Then enter it.';
             const modal = createModal({
                 title: spell.title,
                 body: `
-                    <div class="spell-kicker">Spell Cast ${spell.castCount + 1} — ${spell.tierLabel}</div>
+                    <div class="spell-kicker">${kickerPrefix} ${spell.castCount + 1} — ${spell.tierLabel}</div>
                     <p>${spell.prompt}</p>
-                    <div class="spell-status-msg">Scroll through the grimoire below to find the counterspell rune. Then inscribe it.</div>
+                    <div class="spell-status-msg">${hexHint}</div>
                     <div id="spell-grimoire-container"></div>
                     <div id="spell-code-container"></div>
                 `,
@@ -2608,16 +3949,19 @@ function renderFantasySpell(spell) {
             break;
         }
 
-        /* ── Tier 4: Ritual — stacked phantom modals, then rune selection + code ── */
+        /* ── Tier 4: Ritual / Security Review — stacked approval modals, then selection + code ── */
         case 'ritual': {
             const phantomCount = generator.randomInt(2, 3);
-            // Show instruction modal behind the phantoms
+            const ritualHint = isFantasy
+                ? `Banish all ${phantomCount} phantom seals first. Then select the correct warding rune to reveal the counterspell.`
+                : `Clear all ${phantomCount} pending approvals first. Then select the correct authentication method to reveal the authorization code.`;
+            // Show instruction modal behind the phantoms/approvals
             const mainModal = createModal({
                 title: spell.title,
                 body: `
-                    <div class="spell-kicker">Spell Cast ${spell.castCount + 1} — ${spell.tierLabel}</div>
+                    <div class="spell-kicker">${kickerPrefix} ${spell.castCount + 1} — ${spell.tierLabel}</div>
                     <p>${spell.prompt}</p>
-                    <div class="spell-status-msg">Banish all ${phantomCount} phantom seals first. Then select the correct warding rune to reveal the counterspell.</div>
+                    <div class="spell-status-msg">${ritualHint}</div>
                     <div id="spell-ritual-rune-container" style="display:none;"></div>
                     <div id="spell-ritual-code-container" style="display:none;"></div>
                 `,
@@ -2631,8 +3975,8 @@ function renderFantasySpell(spell) {
             });
 
             createPhantomPopups(phantomCount, () => {
-                // All phantoms banished — show rune selection
-                showToast('All phantoms banished! Now break the ward.', 'success', 2800);
+                // All phantoms/approvals cleared — show rune/credential selection
+                showToast(isFantasy ? 'All phantoms banished! Now break the ward.' : 'All approvals cleared. Complete the verification step.', 'success', 2800);
                 const runeContainer = mainModal.querySelector('#spell-ritual-rune-container');
                 const codeContainer = mainModal.querySelector('#spell-ritual-code-container');
                 runeContainer.style.display = 'block';
@@ -2640,7 +3984,7 @@ function renderFantasySpell(spell) {
                     codeContainer.style.display = 'block';
                     const msg = document.createElement('div');
                     msg.className = 'spell-status-msg is-success';
-                    msg.textContent = 'The ward crumbles. The counterspell is revealed.';
+                    msg.textContent = isFantasy ? 'The ward crumbles. The counterspell is revealed.' : 'Credential verified. Authorization code revealed.';
                     codeContainer.prepend(msg);
                     createCodeEntry(codeContainer);
                     revealCode();
@@ -2650,16 +3994,19 @@ function renderFantasySpell(spell) {
             break;
         }
 
-        /* ── Tier 5: Grand Conjuration — banner + phantoms + grimoire + code ── */
+        /* ── Tier 5: Grand Conjuration / Full Compliance Review — banner + approvals + doc + code ── */
         case 'conjuration': {
             let phase = 0; // 0=banner, 1=phantoms, 2=grimoire+code
+            const conjStatus = isFantasy
+                ? 'First: accept the cursed pact at the bottom of the screen.'
+                : 'First: accept the updated terms at the bottom of the screen.';
 
             const mainModal = createModal({
                 title: spell.title,
                 body: `
-                    <div class="spell-kicker">Spell Cast ${spell.castCount + 1} — ${spell.tierLabel}</div>
+                    <div class="spell-kicker">${kickerPrefix} ${spell.castCount + 1} — ${spell.tierLabel}</div>
                     <p>${spell.prompt}</p>
-                    <div class="spell-status-msg" id="spell-conj-status">First: accept the cursed pact at the bottom of the screen.</div>
+                    <div class="spell-status-msg" id="spell-conj-status">${conjStatus}</div>
                     <div id="spell-conj-grimoire" style="display:none;"></div>
                     <div id="spell-conj-code" style="display:none;"></div>
                 `,
@@ -2676,18 +4023,22 @@ function renderFantasySpell(spell) {
             const grimoireEl = mainModal.querySelector('#spell-conj-grimoire');
             const codeEl = mainModal.querySelector('#spell-conj-code');
 
-            // Phase 0: Cursed pact banner
+            // Phase 0: Pact/terms banner
             createCursedPactBanner(() => {
                 phase = 1;
-                statusEl.textContent = 'Pact accepted. Now banish the phantom seals blocking the grimoire.';
+                statusEl.textContent = isFantasy
+                    ? 'Pact accepted. Now banish the phantom seals blocking the grimoire.'
+                    : 'Terms accepted. Now clear the pending approvals blocking the policy document.';
                 statusEl.className = 'spell-status-msg';
 
-                // Phase 1: Phantom popups
+                // Phase 1: Phantom/approval popups
                 const phantomCount = generator.randomInt(2, 3);
                 createPhantomPopups(phantomCount, () => {
                     phase = 2;
-                    showToast('Phantoms banished! Find the counterspell in the grimoire.', 'success', 3000);
-                    statusEl.textContent = 'Scroll the grimoire to find the counterspell, then inscribe it.';
+                    showToast(isFantasy ? 'Phantoms banished! Find the counterspell in the grimoire.' : 'Approvals cleared. Locate the authorization code in the policy document.', 'success', 3000);
+                    statusEl.textContent = isFantasy
+                        ? 'Scroll the grimoire to find the counterspell, then inscribe it.'
+                        : 'Scroll the policy document to find the authorization code, then enter it.';
                     statusEl.className = 'spell-status-msg is-success';
                     grimoireEl.style.display = 'block';
                     codeEl.style.display = 'block';
@@ -2806,7 +4157,7 @@ function queueFantasyAdversarialRefresh(delay = 260) {
 }
 
 function startFantasyAdversarialEffects(instance = state.currentInstance) {
-    if (!isFantasySpellcastingActive(instance) || state.mode !== 'app') return;
+    if (!isInterruptChallengeActive(instance) || state.mode !== 'app') return;
     const instanceId = instance?.id || null;
     const isContinuingSession = Boolean(
         state.fantasySpellSessionStartedAt

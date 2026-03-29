@@ -2471,6 +2471,36 @@ function initializeBenchmarkSession(instance) {
     }
 }
 
+function startInstanceTimer() {
+    /* Clear any previous timer interval */
+    if (state._instanceTimerInterval) {
+        clearInterval(state._instanceTimerInterval);
+        state._instanceTimerInterval = null;
+    }
+    const timerEl = document.getElementById('instance-timer');
+    if (!timerEl || !state.benchmark) return;
+
+    const update = () => {
+        if (!state.benchmark) {
+            if (state._instanceTimerInterval) clearInterval(state._instanceTimerInterval);
+            return;
+        }
+        const elapsed = Date.now() - state.benchmark.startedAt;
+        timerEl.textContent = formatMissionTime(elapsed);
+    };
+    update();
+    state._instanceTimerInterval = setInterval(update, 1000);
+}
+
+function stopInstanceTimer() {
+    if (state._instanceTimerInterval) {
+        clearInterval(state._instanceTimerInterval);
+        state._instanceTimerInterval = null;
+    }
+    const timerEl = document.getElementById('instance-timer');
+    if (timerEl) timerEl.classList.add('is-hidden');
+}
+
 function recordBenchmarkEvent(type, detail, meta = {}, shouldRefresh = true) {
     if (!state.benchmark) return;
 
@@ -2530,7 +2560,7 @@ function getMissionProgressStats() {
 
 function getNetMissionScore() {
     if (!state.benchmark) return 0;
-    return Math.max(0, state.benchmark.score - state.benchmark.penalties);
+    return state.benchmark.score - state.benchmark.penalties;
 }
 
 function getMissionStanding() {
@@ -2734,6 +2764,7 @@ function finalizeBenchmarkRun(status = 'abandoned') {
     if (savedRun) {
         state.benchmark.savedRunId = savedRun.id;
     }
+    stopInstanceTimer();
     return savedRun;
 }
 

@@ -1121,6 +1121,107 @@ test.describe('MazeRunner standalone', () => {
     await expect(appPage.locator('#fantasy-spell-penalty-host')).toHaveCount(0, { timeout: 2500 });
   });
 
+  test('failed fantasy spells can trigger a wraith that only becomes hittable once the fight begins', async ({ page }) => {
+    await enableFantasyMode(page);
+    await createInstance(page, { domain: 'finance', nav_style: 'sidebar' });
+    const credentials = await readInstanceCredentials(page);
+
+    const appPage = await openInstancePopup(page, '.btn-enter');
+    await signIntoInstance(appPage, credentials);
+
+    const earlyHitCount = await appPage.evaluate(() => {
+      const nativeSetTimeout = window.setTimeout.bind(window);
+      window.setTimeout = (fn, delay, ...args) => nativeSetTimeout(fn, Math.min(delay, 30), ...args);
+      const spell = buildFantasySpell(state.currentInstance, 5);
+      triggerFantasySpellPenalty(spell, 'faded', {
+        effectType: 'wraith'
+      });
+      const wraithImage = document.querySelector('.fantasy-wraith-img');
+      if (wraithImage) {
+        const rect = wraithImage.getBoundingClientRect();
+        document.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          clientX: rect.left + (rect.width / 2),
+          clientY: rect.top + (rect.height / 2)
+        }));
+      }
+      return document.querySelector('.fantasy-wraith-backlash')?.getAttribute('data-hit-count');
+    });
+
+    const wraith = appPage.locator('.fantasy-wraith-backlash');
+    await expect(appPage.locator('#fantasy-spell-penalty-host')).toHaveAttribute('data-effect', 'wraith');
+    await expect(wraith).toHaveAttribute('data-phase', /trail|poem/);
+    expect(earlyHitCount).toBe('0');
+    await expect(wraith).toHaveAttribute('data-hit-count', '0');
+
+    await expect.poll(async () => wraith.getAttribute('data-phase')).toBe('fight');
+    const fightBox = await appPage.locator('.fantasy-wraith-img').boundingBox();
+    expect(fightBox).not.toBeNull();
+    await appPage.mouse.click((fightBox?.x ?? 0) + ((fightBox?.width ?? 0) / 2), (fightBox?.y ?? 0) + ((fightBox?.height ?? 0) / 2));
+    await expect(wraith).toHaveAttribute('data-hit-count', '1');
+  });
+
+  test('failed fantasy spells can trigger a gelatinous cube that visibly absorbs on-screen controls', async ({ page }) => {
+    await enableFantasyMode(page);
+    await createInstance(page, { domain: 'finance', nav_style: 'sidebar' });
+    const credentials = await readInstanceCredentials(page);
+
+    const appPage = await openInstancePopup(page, '.btn-enter');
+    await signIntoInstance(appPage, credentials);
+
+    await appPage.evaluate(() => {
+      const spell = buildFantasySpell(state.currentInstance, 5);
+      triggerFantasySpellPenalty(spell, 'faded', {
+        effectType: 'gelatinous-cube'
+      });
+    });
+
+    const cube = appPage.locator('.fantasy-gelcube-backlash');
+    await expect(appPage.locator('#fantasy-spell-penalty-host')).toHaveAttribute('data-effect', 'gelatinous-cube');
+    await expect(cube).toBeVisible();
+    await expect.poll(async () => Number(await cube.getAttribute('data-captured-count') || '0'), { timeout: 8000 }).toBeGreaterThan(8);
+    await expect.poll(async () => appPage.locator('.fantasy-gelcube-captured-btn').count(), { timeout: 8000 }).toBeGreaterThan(8);
+    await expect.poll(async () => appPage.locator('.fantasy-gelcube-slime-splat').count(), { timeout: 8000 }).toBeGreaterThan(2);
+    await expect.poll(async () => appPage.evaluate(() => {
+      const selector = [
+        'button',
+        'a.button',
+        'a.btn',
+        '.btn',
+        '.button',
+        '.btn-submit',
+        '.btn-reset',
+        '.btn-enter',
+        '.btn-challenge',
+        '.table-action-btn',
+        '[role="button"]',
+        '.nav-item',
+        '.nav-child-item',
+        '.topnav-item',
+        '.lefttop-sidebar-item',
+        '.ribbon-tab',
+        '.page-chip',
+        '.app-header-chip',
+        '.benchmark-chip',
+        '.dashboard-chip',
+        '.inline-alert-action-btn',
+        '.inline-alert-dismiss',
+        '.info-icon',
+        '.search-icon',
+        '.hub-action-icon',
+        '.cmdpalette-result-icon',
+        '.status-icon',
+        '.alert-icon',
+        '.session-timeout-icon'
+      ].join(', ');
+      return Array.from(document.querySelectorAll(selector)).filter((node) => {
+        const style = getComputedStyle(node);
+        return style.visibility === 'hidden' || node.dataset.gelcubeCaptured === 'true';
+      }).length;
+    }), { timeout: 8000 }).toBeGreaterThan(8);
+  });
+
   test('failed fantasy spells can trigger a dragon backlash that can be slain with the sword cursor', async ({ page }) => {
     await enableFantasyMode(page);
     await createInstance(page, { domain: 'finance', nav_style: 'sidebar' });
